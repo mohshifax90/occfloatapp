@@ -9,7 +9,7 @@ function ThemeProvider({
 }: React.ComponentProps<typeof NextThemesProvider>) {
   return (
     <NextThemesProvider
-      attribute="class"
+      attribute="data-bs-theme"
       defaultTheme="system"
       enableSystem
       disableTransitionOnChange
@@ -47,7 +47,8 @@ function ThemeHotkey() {
         return
       }
 
-      if (event.key.toLowerCase() !== "d") {
+      const key = typeof event.key === "string" ? event.key.toLowerCase() : ""
+      if (key !== "d") {
         return
       }
 
