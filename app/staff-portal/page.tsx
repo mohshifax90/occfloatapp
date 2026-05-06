@@ -50,6 +50,7 @@ import StepLabel from "@mui/material/StepLabel"
 const STORAGE_KEY = "occfloat.v1"
 const AUTH_CACHE_KEY = "occfloat.authCache.v1"
 const AUTH_STORAGE_KEY = "occfloat.staffPortalAuthStaffId"
+const AUTH_STAFF_NO_KEY = "occfloat.staffPortalAuthStaffNo"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
@@ -85,7 +86,6 @@ type DataStore = {
 type StaffRequest = {
   id: string
   createdAt: string
-  staffId: string
   staffNo: string
   staffName: string
   type: "Leave" | "Attendance" | "Roster Change"
@@ -492,6 +492,7 @@ export default function StaffPortalPage() {
   const [hydrated, setHydrated] = useState(false)
   const [store, setStore] = useState<DataStore>(getEmptyStore())
   const [authStaffId, setAuthStaffId] = useState<string | null>(null)
+  const [authStaffNo, setAuthStaffNo] = useState("")
   const [staffRequests, setStaffRequests] = useState<StaffRequest[]>([])
 
   const [activeTab, setActiveTab] = useState<PortalTab>("ops")
@@ -570,6 +571,7 @@ export default function StaffPortalPage() {
     setStore(seeded)
     setStaffRequests(safeParseRequests(window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)))
     setAuthStaffId(window.localStorage.getItem(AUTH_STORAGE_KEY))
+    setAuthStaffNo((window.localStorage.getItem(AUTH_STAFF_NO_KEY) || "").trim())
     setHydrated(true)
   }, [])
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -931,7 +933,9 @@ export default function StaffPortalPage() {
       return
     }
     window.localStorage.setItem(AUTH_STORAGE_KEY, staff.id)
+    window.localStorage.setItem(AUTH_STAFF_NO_KEY, (staff.staffNo || sno).trim())
     setAuthStaffId(staff.id)
+    setAuthStaffNo((staff.staffNo || sno).trim())
     setLoginError("")
     setLoginDebug("")
     setLoginStaffNo("")
@@ -939,7 +943,9 @@ export default function StaffPortalPage() {
 
   const logout = () => {
     window.localStorage.removeItem(AUTH_STORAGE_KEY)
+    window.localStorage.removeItem(AUTH_STAFF_NO_KEY)
     setAuthStaffId(null)
+    setAuthStaffNo("")
     setActiveTab("ops")
     setLoginError("")
   }
@@ -956,7 +962,6 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffId: me.id,
       staffNo: me.staffNo || "",
       staffName: me.fullName || "",
       type: "Leave",
@@ -998,7 +1003,6 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffId: me.id,
       staffNo: me.staffNo || "",
       staffName: me.fullName || "",
       type: "Roster Change",
@@ -1057,7 +1061,6 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffId: me.id,
       staffNo: me.staffNo || "",
       staffName: me.fullName || "",
       type: "Attendance",
@@ -1118,7 +1121,7 @@ export default function StaffPortalPage() {
     const today = toYmd(new Date())
     const next = staffRequests.map((r) => {
       if (r.id !== requestId) return r
-      if (r.staffId !== me.id) return r
+      if ((r.staffNo || "").trim() !== (me.staffNo || "").trim()) return r
       if (r.type !== "Attendance") return r
       if (r.status === "Approved" || r.status === "Rejected" || r.status === "Cancelled") return r
       const anchorDate = (r.fromDate || r.date || "").trim()
@@ -1274,8 +1277,8 @@ export default function StaffPortalPage() {
                 staffRequests
                   .filter(
                     (r) =>
-                      (r.staffId === me.id ||
-                        (r.staffNo || "").trim() === (me.staffNo || "").trim()) &&
+                      ((r.staffNo || "").trim() === (me.staffNo || "").trim() ||
+                        (authStaffNo && (r.staffNo || "").trim() === authStaffNo)) &&
                       r.type === "Roster Change" &&
                       r.status === "Pending Approval" &&
                       r.date,
@@ -1294,8 +1297,8 @@ export default function StaffPortalPage() {
             )}
             myRequests={staffRequests.filter(
               (r) =>
-                r.staffId === me.id ||
-                (r.staffNo || "").trim() === (me.staffNo || "").trim(),
+                (r.staffNo || "").trim() === (me.staffNo || "").trim() ||
+                (authStaffNo && (r.staffNo || "").trim() === authStaffNo),
             )}
             incomingSwapRequests={staffRequests.filter(
               (r) =>
