@@ -1274,7 +1274,8 @@ export default function StaffPortalPage() {
                 staffRequests
                   .filter(
                     (r) =>
-                      r.staffId === me.id &&
+                      (r.staffId === me.id ||
+                        (r.staffNo || "").trim() === (me.staffNo || "").trim()) &&
                       r.type === "Roster Change" &&
                       r.status === "Pending Approval" &&
                       r.date,
@@ -1291,7 +1292,11 @@ export default function StaffPortalPage() {
             myLeaves={store.leaves.filter(
               (l) => (l.staffNo || "").trim() === (me.staffNo || "").trim(),
             )}
-            myRequests={staffRequests.filter((r) => r.staffId === me.id)}
+            myRequests={staffRequests.filter(
+              (r) =>
+                r.staffId === me.id ||
+                (r.staffNo || "").trim() === (me.staffNo || "").trim(),
+            )}
             incomingSwapRequests={staffRequests.filter(
               (r) =>
                 r.type === "Roster Change" &&
