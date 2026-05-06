@@ -53,7 +53,7 @@ const AUTH_STORAGE_KEY = "occfloat.staffPortalAuthStaffId"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
-const STAFF_PORTAL_BUILD_TAG = "f4092ea"
+const STAFF_PORTAL_BUILD_TAG = process.env.NEXT_PUBLIC_BUILD_ID || "dev"
 
 // ---------------------------------------------------------------------------
 // Minimal mirrors of the types we need from the main app. We keep them loose
@@ -234,6 +234,10 @@ function normalizeStoreFromPayload(payload: unknown): DataStore {
     next[k] = Array.isArray(v) ? (v as Entry[]) : []
   })
   return next
+}
+
+function normalizeStaffNo(value: string): string {
+  return (value || "").trim().replace(/\s+/g, "")
 }
 
 function safeParseRequests(raw: string | null): StaffRequest[] {
@@ -499,6 +503,7 @@ export default function StaffPortalPage() {
   // Login form (shown when no auth staff id is present).
   const [loginStaffNo, setLoginStaffNo] = useState("")
   const [loginError, setLoginError] = useState("")
+  const [loginDebug, setLoginDebug] = useState("")
 
   // Pairing modal state (Ops tab).
   const [pairingDate, setPairingDate] = useState<string | null>(null)
@@ -846,7 +851,10 @@ export default function StaffPortalPage() {
   // Auth handlers.
   // ------------------------------------------------------------------
   const findStaffByNo = async (sno: string): Promise<Entry | null> => {
-    let staff = store.staff.find((s) => (s.staffNo || "").trim() === sno) || null
+    const key = normalizeStaffNo(sno)
+    setLoginDebug(`Lookup ${key}: local staff count=${store.staff.length}`)
+    let staff =
+      store.staff.find((s) => normalizeStaffNo(s.staffNo || "") === key) || null
     if (!staff && supabase) {
       try {
         const { data } = await supabase
@@ -855,6 +863,9 @@ export default function StaffPortalPage() {
           .eq("id", SUPABASE_STORE_ID)
           .maybeSingle()
         const remoteStore = normalizeStoreFromPayload(data?.payload)
+        setLoginDebug(
+          `Lookup ${key}: Supabase payload loaded, remote staff count=${remoteStore.staff.length}`,
+        )
         if (remoteStore.staff.length > 0) {
           setStore(remoteStore)
           try {
@@ -865,12 +876,38 @@ export default function StaffPortalPage() {
           } catch {
             // ignore
           }
-          staff = remoteStore.staff.find((s) => (s.staffNo || "").trim() === sno) || null
+          staff =
+            remoteStore.staff.find((s) => normalizeStaffNo(s.staffNo || "") === key) || null
         }
       } catch {
-        // keep local fallback
+        setLoginDebug(`Lookup ${key}: Supabase fetch failed`)
       }
     }
+    if (!staff) {
+      const fromRoster =
+        store.roster.find((r) => normalizeStaffNo(r.staffNo || "") === key) || null
+      const fromLeaves =
+        store.leaves.find((l) => normalizeStaffNo(l.staffNo || "") === key) || null
+      const seed = fromRoster || fromLeaves
+      if (seed) {
+        const fallbackStaff: Entry = {
+          id: `derived-${key}`,
+          createdAt: new Date().toISOString(),
+          staffNo: normalizeStaffNo(seed.staffNo || ""),
+          fullName: (seed.staffName || "").trim() || `Staff ${key}`,
+          activeStatus: "Active",
+        }
+        setStore((prev) => ({
+          ...prev,
+          staff: prev.staff.some((s) => normalizeStaffNo(s.staffNo || "") === key)
+            ? prev.staff
+            : [fallbackStaff, ...prev.staff],
+        }))
+        staff = fallbackStaff
+        setLoginDebug(`Lookup ${key}: derived from ${fromRoster ? "roster" : "leaves"} data`)
+      }
+    }
+    if (staff) setLoginDebug(`Lookup ${key}: matched staff ${staff.staffNo || "-"}`)
     return staff
   }
 
@@ -878,6 +915,7 @@ export default function StaffPortalPage() {
     const sno = loginStaffNo.trim()
     if (!sno) {
       setLoginError("Enter your staff number.")
+      setLoginDebug("")
       return
     }
     const staff = await findStaffByNo(sno)
@@ -892,6 +930,7 @@ export default function StaffPortalPage() {
     window.localStorage.setItem(AUTH_STORAGE_KEY, staff.id)
     setAuthStaffId(staff.id)
     setLoginError("")
+    setLoginDebug("")
     setLoginStaffNo("")
   }
 
@@ -1139,6 +1178,9 @@ export default function StaffPortalPage() {
             </div>
             {loginError ? (
               <div className="alert alert-danger py-2 small">{loginError}</div>
+            ) : null}
+            {loginDebug ? (
+              <div className="alert alert-secondary py-2 small">{loginDebug}</div>
             ) : null}
             <button
               className="btn w-100 fw-semibold"
