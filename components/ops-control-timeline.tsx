@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clipboard,
   ClipboardCheck,
+  Clock,
   Coffee,
   Eye,
   EyeOff,
@@ -561,7 +562,7 @@ export default function OpsControlTimeline(props: {
   flights: FlightEntry[]
   setFlights: (next: FlightEntry[]) => void
 }) {
-  const { flights, setFlights } = props
+  const { flights: allFlights, setFlights } = props
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -576,6 +577,12 @@ export default function OpsControlTimeline(props: {
     const d = new Date()
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
   })
+  // Scope Ops timeline computations to the selected day only.
+  // This prevents heavy multi-day datasets from freezing the screen.
+  const flights = useMemo(
+    () => allFlights.filter((f) => (f.scheduleDate || "").trim() === scheduleDate),
+    [allFlights, scheduleDate],
+  )
 
   // Tick interval slider — discrete steps in minutes. Default 15.
   const INTERVAL_OPTIONS = [5, 10, 15, 30, 60]
@@ -900,6 +907,25 @@ export default function OpsControlTimeline(props: {
       breaksByMode,
       routeConflicts,
     }
+  }, [flights])
+  const avgServiceByAircraft = useMemo(() => {
+    const map = new Map<string, { totalMin: number; legs: number }>()
+    flights.forEach((f) => {
+      const tail = (f.aircraft || "").trim()
+      if (!tail) return
+      const durMin = flightDurationMin(f.depTime, f.arrTime)
+      const entry = map.get(tail) ?? { totalMin: 0, legs: 0 }
+      entry.totalMin += Math.max(durMin, 0)
+      entry.legs += 1
+      map.set(tail, entry)
+    })
+    return [...map.entries()]
+      .map(([tail, v]) => ({
+        tail,
+        avgHrs: v.legs > 0 ? v.totalMin / v.legs / 60 : 0,
+        legs: v.legs,
+      }))
+      .sort((a, b) => b.avgHrs - a.avgHrs)
   }, [flights])
 
   // Local copy-state for the brief's clipboard button.
@@ -1302,12 +1328,12 @@ export default function OpsControlTimeline(props: {
               </div>
 
               <div className="row g-3">
-                {/* MLE event-free windows — toggle dep / arr / both */}
+                {/* Service window by month */}
                 <div className="col-md-6">
                   <div className="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
                     <div className="fw-semibold small d-flex align-items-center gap-2">
                       <Coffee size={14} color="#92400e" />
-                      {breakLabel}
+                      Service window by month
                     </div>
                     <div className="d-flex align-items-center gap-2">
                       <div
@@ -1409,8 +1435,57 @@ export default function OpsControlTimeline(props: {
                   )}
                 </div>
 
-                {/* Route conflicts */}
+                {/* Average service hrs by aircraft (moved to right side) */}
                 <div className="col-md-6">
+                  <div className="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
+                    <div className="fw-semibold small d-flex align-items-center gap-2">
+                      <Clock size={14} color="#1d4ed8" />
+                      Average service hrs by aircraft
+                    </div>
+                    <span className="badge bg-primary-subtle text-primary-emphasis">
+                      {avgServiceByAircraft.length}
+                    </span>
+                  </div>
+                  {avgServiceByAircraft.length === 0 ? (
+                    <div className="text-muted small fst-italic">
+                      No aircraft timing data available.
+                    </div>
+                  ) : (
+                    <div
+                      className="rounded"
+                      style={{
+                        border: "1px solid var(--bs-border-color, #e2e8f0)",
+                        maxHeight: 220,
+                        overflow: "auto",
+                      }}
+                    >
+                      <table
+                        className="table table-sm align-middle mb-0"
+                        style={{ fontSize: 12 }}
+                      >
+                        <thead>
+                          <tr className="text-uppercase small text-muted">
+                            <th>Aircraft</th>
+                            <th className="text-end">Avg hrs</th>
+                            <th className="text-end">Legs</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {avgServiceByAircraft.map((row) => (
+                            <tr key={row.tail}>
+                              <td className="fw-semibold">{row.tail}</td>
+                              <td className="text-end">{row.avgHrs.toFixed(2)}</td>
+                              <td className="text-end">{row.legs}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="row g-3 mt-1">
+                <div className="col-12">
                   <div className="d-flex align-items-center justify-content-between mb-2">
                     <div className="fw-semibold small d-flex align-items-center gap-2">
                       <AlertTriangle size={14} color="#b91c1c" />
@@ -1456,17 +1531,13 @@ export default function OpsControlTimeline(props: {
                             <tr key={i} style={{ background: "#fef2f2" }}>
                               <td className="fw-semibold">{c.destination}</td>
                               <td>
-                                <div className="fw-semibold">
-                                  {c.a.flightNo}
-                                </div>
+                                <div className="fw-semibold">{c.a.flightNo}</div>
                                 <div className="text-muted small">
                                   {c.a.aircraft} · {c.a.depTime}/{c.a.arrTime}
                                 </div>
                               </td>
                               <td>
-                                <div className="fw-semibold">
-                                  {c.b.flightNo}
-                                </div>
+                                <div className="fw-semibold">{c.b.flightNo}</div>
                                 <div className="text-muted small">
                                   {c.b.aircraft} · {c.b.depTime}/{c.b.arrTime}
                                 </div>

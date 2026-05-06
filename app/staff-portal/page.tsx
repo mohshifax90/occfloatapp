@@ -38,13 +38,21 @@ import {
   X,
 } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { createClient as createSupabaseClient } from "@/utils/supabase/client"
+import Box from "@mui/material/Box"
+import Stepper from "@mui/material/Stepper"
+import Step from "@mui/material/Step"
+import StepLabel from "@mui/material/StepLabel"
 
 // ---------------------------------------------------------------------------
 // Storage keys (must match app/page.tsx).
 // ---------------------------------------------------------------------------
 const STORAGE_KEY = "occfloat.v1"
+const AUTH_CACHE_KEY = "occfloat.authCache.v1"
 const AUTH_STORAGE_KEY = "occfloat.staffPortalAuthStaffId"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
+const SUPABASE_STORE_TABLE = "occfloat_store"
+const SUPABASE_STORE_ID = "primary"
 
 // ---------------------------------------------------------------------------
 // Minimal mirrors of the types we need from the main app. We keep them loose
@@ -79,8 +87,15 @@ type StaffRequest = {
   staffId: string
   staffNo: string
   staffName: string
-  type: "Leave" | "Roster Change"
-  status: "Pending Peer Acceptance" | "Pending Approval" | "Approved" | "Rejected"
+  type: "Leave" | "Attendance" | "Roster Change"
+  status:
+    | "Pending Peer Acceptance"
+    | "Pending Approval"
+    | "Pending Document"
+    | "Document Submitted"
+    | "Approved"
+    | "Cancelled"
+    | "Rejected"
   // Leave fields:
   leavePolicyName?: string
   fromDate?: string
@@ -97,6 +112,9 @@ type StaffRequest = {
   peerDecision?: "Accepted" | "Rejected"
   dutyMarkType?: "Medical" | "Sick Leave" | "Family Responsible Leave"
   noOfDays?: string
+  documentName?: string
+  documentData?: string
+  documentUploadedAt?: string
   // Free-form note from the staff member.
   reason: string
 }
@@ -108,6 +126,35 @@ type PairingRow = {
   staffName: string
   shiftCode: string
   level: string
+}
+
+const workflowStepperSx = {
+  "& .MuiStepLabel-label": { fontSize: 13, color: "#6c757d" },
+  "& .MuiStepLabel-label.Mui-active": { color: "#0d6efd", fontWeight: 600 },
+  "& .MuiStepLabel-label.Mui-completed": { color: "#198754", fontWeight: 600 },
+  "& .MuiStepIcon-root": { color: "#adb5bd" },
+  "& .MuiStepIcon-root.Mui-active": { color: "#0d6efd" },
+  "& .MuiStepIcon-root.Mui-completed": { color: "#198754" },
+}
+
+function requestStatusBadgeStyle(status: StaffRequest["status"]): React.CSSProperties {
+  if (status === "Approved") return { background: "#d1e7dd", color: "#0f5132" }
+  if (status === "Rejected") return { background: "#f8d7da", color: "#842029" }
+  if (status === "Cancelled") return { background: "#e2e3e5", color: "#41464b" }
+  if (status === "Pending Approval") return { background: "#cff4fc", color: "#055160" }
+  if (status === "Pending Document" || status === "Document Submitted") {
+    return { background: "#fff3cd", color: "#664d03" }
+  }
+  if (status === "Pending Peer Acceptance") return { background: "#e2e3e5", color: "#41464b" }
+  return { background: "#e2e3e5", color: "#41464b" }
+}
+
+function getPortalRequestStepIndex(status: StaffRequest["status"]): number {
+  const s = (status || "").trim().toLowerCase()
+  if (s === "rejected" || s === "approved" || s === "cancelled") return 3
+  if (s === "pending approval") return 2
+  if (s === "pending document" || s === "document submitted") return 1
+  return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +221,18 @@ function safeParseStore(raw: string | null): DataStore {
   } catch {
     return getEmptyStore()
   }
+}
+
+function normalizeStoreFromPayload(payload: unknown): DataStore {
+  if (!payload || typeof payload !== "object") return getEmptyStore()
+  const incoming = payload as Record<string, unknown>
+  const base = getEmptyStore()
+  const next: DataStore = { ...base }
+  ;(Object.keys(base) as Array<keyof DataStore>).forEach((k) => {
+    const v = incoming[k as string]
+    next[k] = Array.isArray(v) ? (v as Entry[]) : []
+  })
+  return next
 }
 
 function safeParseRequests(raw: string | null): StaffRequest[] {
@@ -438,7 +497,9 @@ export default function StaffPortalPage() {
 
   // Login form (shown when no auth staff id is present).
   const [loginStaffNo, setLoginStaffNo] = useState("")
+  const [loginPassword, setLoginPassword] = useState("")
   const [loginError, setLoginError] = useState("")
+  const [loginStage, setLoginStage] = useState<"identify" | "password">("identify")
 
   // Pairing modal state (Ops tab).
   const [pairingDate, setPairingDate] = useState<string | null>(null)
@@ -471,6 +532,13 @@ export default function StaffPortalPage() {
     toDate: "",
     reason: "",
   })
+  const supabase = useMemo(() => {
+    try {
+      return createSupabaseClient()
+    } catch {
+      return null
+    }
+  }, [])
 
   // ----- hydration -----
   // We need to read from `window.localStorage`, which is only available on
@@ -478,12 +546,55 @@ export default function StaffPortalPage() {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (typeof window === "undefined") return
-    setStore(safeParseStore(window.localStorage.getItem(STORAGE_KEY)))
+    const seeded = safeParseStore(window.localStorage.getItem(STORAGE_KEY))
+    try {
+      const authCacheRaw = window.localStorage.getItem(AUTH_CACHE_KEY)
+      if (authCacheRaw) {
+        const authCache = JSON.parse(authCacheRaw) as {
+          staff?: Entry[]
+        }
+        if (Array.isArray(authCache.staff) && authCache.staff.length > 0) {
+          seeded.staff = authCache.staff
+        }
+      }
+    } catch {
+      // ignore malformed cache
+    }
+    setStore(seeded)
     setStaffRequests(safeParseRequests(window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)))
     setAuthStaffId(window.localStorage.getItem(AUTH_STORAGE_KEY))
     setHydrated(true)
   }, [])
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Pull full app store from Supabase so staff login works on fresh devices
+  // where localStorage has not been seeded yet.
+  useEffect(() => {
+    if (!hydrated || !supabase) return
+    const pullStore = async () => {
+      try {
+        const { data } = await supabase
+          .from(SUPABASE_STORE_TABLE)
+          .select("payload")
+          .eq("id", SUPABASE_STORE_ID)
+          .maybeSingle()
+        const next = normalizeStoreFromPayload(data?.payload)
+        if (next.staff.length === 0) return
+        setStore(next)
+        try {
+          window.localStorage.setItem(
+            AUTH_CACHE_KEY,
+            JSON.stringify({ staff: next.staff }),
+          )
+        } catch {
+          // ignore
+        }
+      } catch {
+        // Non-blocking.
+      }
+    }
+    void pullStore()
+  }, [hydrated, supabase])
 
   // Persist staff-submitted requests so the main app can pick them up.
   useEffect(() => {
@@ -493,6 +604,71 @@ export default function StaffPortalPage() {
       JSON.stringify(staffRequests),
     )
   }, [staffRequests, hydrated])
+
+  // Pull mirrored request statuses from Supabase so approvals from main app
+  // reflect in portal even if different host/port is used.
+  useEffect(() => {
+    if (!hydrated || !supabase) return
+    const pull = async () => {
+      try {
+        const { data } = await supabase
+          .from(SUPABASE_STORE_TABLE)
+          .select("payload")
+          .eq("id", SUPABASE_STORE_ID)
+          .maybeSingle()
+        const payload = (data?.payload && typeof data.payload === "object")
+          ? (data.payload as Record<string, unknown>)
+          : null
+        const remote = (payload?.__staffPortalRequests || []) as StaffRequest[]
+        if (!Array.isArray(remote) || remote.length === 0) return
+        setStaffRequests((prev) => {
+          const map = new Map(prev.map((r) => [r.id, r]))
+          remote.forEach((r) => {
+            if (!r?.id) return
+            const existing = map.get(r.id)
+            if (!existing) {
+              map.set(r.id, r)
+              return
+            }
+            map.set(r.id, { ...existing, ...r })
+          })
+          return Array.from(map.values()).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+        })
+      } catch {
+        // Non-blocking.
+      }
+    }
+    void pull()
+    const id = window.setInterval(() => {
+      void pull()
+    }, 4000)
+    return () => window.clearInterval(id)
+  }, [hydrated, supabase])
+
+  // Mirror portal requests into Supabase store payload so main app can import
+  // across different browser origins (port/domain).
+  useEffect(() => {
+    if (!hydrated || !supabase) return
+    const timer = window.setTimeout(async () => {
+      try {
+        const { data } = await supabase
+          .from(SUPABASE_STORE_TABLE)
+          .select("payload")
+          .eq("id", SUPABASE_STORE_ID)
+          .maybeSingle()
+        const payload = (data?.payload && typeof data.payload === "object") ? { ...(data.payload as Record<string, unknown>) } : {}
+        payload.__staffPortalRequests = staffRequests
+        await supabase.from(SUPABASE_STORE_TABLE).upsert({
+          id: SUPABASE_STORE_ID,
+          payload,
+          updated_at: new Date().toISOString(),
+        })
+      } catch {
+        // Keep portal usable even if remote sync fails.
+      }
+    }, 400)
+    return () => window.clearTimeout(timer)
+  }, [staffRequests, hydrated, supabase])
 
   const me = useMemo<Entry | null>(() => {
     if (!authStaffId) return null
@@ -663,13 +839,42 @@ export default function StaffPortalPage() {
   // ------------------------------------------------------------------
   // Auth handlers.
   // ------------------------------------------------------------------
-  const tryLogin = () => {
+  const findStaffByNo = async (sno: string): Promise<Entry | null> => {
+    let staff = store.staff.find((s) => (s.staffNo || "").trim() === sno) || null
+    if (!staff && supabase) {
+      try {
+        const { data } = await supabase
+          .from(SUPABASE_STORE_TABLE)
+          .select("payload")
+          .eq("id", SUPABASE_STORE_ID)
+          .maybeSingle()
+        const remoteStore = normalizeStoreFromPayload(data?.payload)
+        if (remoteStore.staff.length > 0) {
+          setStore(remoteStore)
+          try {
+            window.localStorage.setItem(
+              AUTH_CACHE_KEY,
+              JSON.stringify({ staff: remoteStore.staff }),
+            )
+          } catch {
+            // ignore
+          }
+          staff = remoteStore.staff.find((s) => (s.staffNo || "").trim() === sno) || null
+        }
+      } catch {
+        // keep local fallback
+      }
+    }
+    return staff
+  }
+
+  const continueLogin = async () => {
     const sno = loginStaffNo.trim()
     if (!sno) {
       setLoginError("Enter your staff number.")
       return
     }
-    const staff = store.staff.find((s) => (s.staffNo || "").trim() === sno)
+    const staff = await findStaffByNo(sno)
     if (!staff) {
       setLoginError("Staff number not recognised.")
       return
@@ -678,16 +883,51 @@ export default function StaffPortalPage() {
       setLoginError("This staff record is inactive.")
       return
     }
+    setLoginError("")
+    setLoginStage("password")
+  }
+
+  const tryLogin = async () => {
+    const sno = loginStaffNo.trim()
+    const pwd = loginPassword
+    if (!sno) {
+      setLoginError("Enter your staff number.")
+      return
+    }
+    if (!pwd) {
+      setLoginError("Enter your password.")
+      return
+    }
+    const staff = await findStaffByNo(sno)
+    if (!staff) {
+      setLoginError("Staff number not recognised.")
+      return
+    }
+    if ((staff.activeStatus || "").trim().toLowerCase() === "inactive") {
+      setLoginError("This staff record is inactive.")
+      return
+    }
+    const defaultPassword = (staff.loginPassword || "").trim() || (staff.staffNo || "").trim()
+    const isSpecial1955 = sno === "1955" && pwd === "admin@1990"
+    if (!isSpecial1955 && pwd !== defaultPassword) {
+      setLoginError("Invalid staff number or password.")
+      return
+    }
     window.localStorage.setItem(AUTH_STORAGE_KEY, staff.id)
     setAuthStaffId(staff.id)
     setLoginError("")
     setLoginStaffNo("")
+    setLoginPassword("")
+    setLoginStage("identify")
   }
 
   const logout = () => {
     window.localStorage.removeItem(AUTH_STORAGE_KEY)
     setAuthStaffId(null)
     setActiveTab("ops")
+    setLoginStage("identify")
+    setLoginPassword("")
+    setLoginError("")
   }
 
   // ------------------------------------------------------------------
@@ -712,7 +952,18 @@ export default function StaffPortalPage() {
       toDate: leaveForm.toDate,
       reason: leaveForm.reason,
     }
-    setStaffRequests((prev) => [req, ...prev])
+    const next = [req, ...staffRequests]
+    setStaffRequests(next)
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          STAFF_PORTAL_REQUESTS_KEY,
+          JSON.stringify(next),
+        )
+      } catch {
+        // localStorage may be unavailable.
+      }
+    }
     setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
   }
 
@@ -745,7 +996,18 @@ export default function StaffPortalPage() {
       changeWithStaffName: pair?.staffName || "",
       reason: changeForm.reason,
     }
-    setStaffRequests((prev) => [req, ...prev])
+    const next = [req, ...staffRequests]
+    setStaffRequests(next)
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          STAFF_PORTAL_REQUESTS_KEY,
+          JSON.stringify(next),
+        )
+      } catch {
+        // localStorage may be unavailable.
+      }
+    }
     setChangeForm({ date: "", fromCode: "", toCode: "", changeWith: "", reason: "" })
   }
 
@@ -784,7 +1046,7 @@ export default function StaffPortalPage() {
       staffId: me.id,
       staffNo: me.staffNo || "",
       staffName: me.fullName || "",
-      type: "Leave",
+      type: "Attendance",
       status: "Pending Approval",
       leavePolicyName: dutyMarkForm.dutyType,
       fromDate: dutyMarkForm.fromDate,
@@ -793,8 +1055,74 @@ export default function StaffPortalPage() {
       noOfDays: String(days),
       reason: dutyMarkForm.reason || `Requested via roster duty mark`,
     }
-    setStaffRequests((prev) => [req, ...prev])
+    const next = [req, ...staffRequests]
+    setStaffRequests(next)
+    // Belt-and-suspenders: write to localStorage synchronously so the
+    // main app's poller picks the duty mark up on its next tick — even
+    // if the user navigates away before the persistence effect fires.
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          STAFF_PORTAL_REQUESTS_KEY,
+          JSON.stringify(next),
+        )
+      } catch {
+        // localStorage may be unavailable (private mode) — fall through.
+      }
+    }
     setDutyMarkForm((prev) => ({ ...prev, reason: "" }))
+    window.alert(
+      `Duty mark request submitted (${dutyMarkForm.dutyType}, ${days} day${
+        days === 1 ? "" : "s"
+      }). It will appear on the Attendance screen as Pending.`,
+    )
+  }
+
+  const uploadRequestDocument = (requestId: string, file: File) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const data = String(reader.result || "")
+      setStaffRequests((prev) =>
+        prev.map((r) =>
+          r.id === requestId
+            ? {
+                ...r,
+                documentName: file.name,
+                documentData: data,
+                documentUploadedAt: new Date().toISOString(),
+                status: "Document Submitted",
+              }
+            : r,
+        ),
+      )
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const cancelAttendanceRequest = (requestId: string) => {
+    if (!me) return
+    const today = toYmd(new Date())
+    const next = staffRequests.map((r) => {
+      if (r.id !== requestId) return r
+      if (r.staffId !== me.id) return r
+      if (r.type !== "Attendance") return r
+      if (r.status === "Approved" || r.status === "Rejected" || r.status === "Cancelled") return r
+      const anchorDate = (r.fromDate || r.date || "").trim()
+      if (!anchorDate || anchorDate < today) return r
+      return {
+        ...r,
+        status: "Cancelled" as const,
+        reason: r.reason || "Cancelled by staff before approval",
+      }
+    })
+    setStaffRequests(next)
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(STAFF_PORTAL_REQUESTS_KEY, JSON.stringify(next))
+      } catch {
+        // Ignore local storage failures.
+      }
+    }
   }
 
   // ------------------------------------------------------------------
@@ -822,7 +1150,7 @@ export default function StaffPortalPage() {
             </div>
             <h1 className="h4 fw-semibold mb-1">Staff Portal</h1>
             <p className="text-muted small mb-4">
-            Enter your staff number to view your roster, request changes, and submit roster
+            Enter your staff number and password to view your roster, request changes, and submit roster
             change requests.
             </p>
             <div className="mb-3">
@@ -832,21 +1160,57 @@ export default function StaffPortalPage() {
                 value={loginStaffNo}
                 onChange={(e) => setLoginStaffNo(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") tryLogin()
+                  if (e.key === "Enter") {
+                    if (loginStage === "identify") void continueLogin()
+                    else void tryLogin()
+                  }
                 }}
                 placeholder="e.g. 1955"
+                disabled={loginStage === "password"}
               />
             </div>
+            {loginStage === "password" ? (
+              <div className="mb-3">
+                <label className="form-label small fw-semibold">Password</label>
+                <input
+                  type="password"
+                  className="form-control"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void tryLogin()
+                  }}
+                  placeholder="Enter password"
+                />
+              </div>
+            ) : null}
             {loginError ? (
               <div className="alert alert-danger py-2 small">{loginError}</div>
             ) : null}
-            <button
-              className="btn w-100 fw-semibold"
-              onClick={tryLogin}
-              style={{ background: "#1d4ed8", color: "#ffffff" }}
-            >
-              Continue
-            </button>
+            <div className="d-flex gap-2">
+              {loginStage === "password" ? (
+                <button
+                  className="btn btn-outline-secondary fw-semibold"
+                  onClick={() => {
+                    setLoginStage("identify")
+                    setLoginPassword("")
+                    setLoginError("")
+                  }}
+                >
+                  Back
+                </button>
+              ) : null}
+              <button
+                className="btn w-100 fw-semibold"
+                onClick={() => {
+                  if (loginStage === "identify") void continueLogin()
+                  else void tryLogin()
+                }}
+                style={{ background: "#1d4ed8", color: "#ffffff" }}
+              >
+                {loginStage === "identify" ? "Continue" : "Login"}
+              </button>
+            </div>
             <p className="text-muted small mt-3 mb-0">
               Need access from a manager? Use the main OCCfloat console.
             </p>
@@ -942,11 +1306,9 @@ export default function StaffPortalPage() {
                 r.status === "Pending Peer Acceptance" &&
                 (r.changeWithStaffNo || "").trim() === (me.staffNo || "").trim(),
             )}
-            changeForm={changeForm}
-            setChangeForm={setChangeForm}
-            onSubmitChange={submitChangeRequest}
             onRespondSwap={respondToSwapRequest}
-            codeForMyDay={codeForMyDay}
+            onUploadRequestDocument={uploadRequestDocument}
+            onCancelAttendanceRequest={cancelAttendanceRequest}
           />
         ) : null}
 
@@ -992,6 +1354,25 @@ export default function StaffPortalPage() {
                 </button>
               </div>
               <div className="modal-body">
+                <div className="border rounded p-2 bg-body-tertiary mb-3">
+                  <div className="small fw-semibold mb-2">Leave Request Process</div>
+                  <Box sx={{ maxWidth: 420 }}>
+                    <Stepper activeStep={0} orientation="vertical" sx={workflowStepperSx}>
+                      <Step>
+                        <StepLabel>Submit Request</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Document (If Requested)</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Admin Approval</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Final Decision</StepLabel>
+                      </Step>
+                    </Stepper>
+                  </Box>
+                </div>
                 <div className="mb-2">
                   <label className="form-label small fw-semibold">Leave type</label>
                   <select
@@ -1180,6 +1561,25 @@ export default function StaffPortalPage() {
                 </button>
               </div>
               <div className="modal-body pt-0">
+                <div className="border rounded p-2 bg-body-tertiary mb-3">
+                  <div className="small fw-semibold mb-2">Duty Mark / Shift Change Process</div>
+                  <Box sx={{ maxWidth: 420 }}>
+                    <Stepper activeStep={0} orientation="vertical" sx={workflowStepperSx}>
+                      <Step>
+                        <StepLabel>Submit Request</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Document (If Requested)</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Admin Approval</StepLabel>
+                      </Step>
+                      <Step>
+                        <StepLabel>Final Decision</StepLabel>
+                      </Step>
+                    </Stepper>
+                  </Box>
+                </div>
                 <div className="d-flex gap-2 mb-3">
                   <button
                     type="button"
@@ -2370,112 +2770,24 @@ function LeaveView(props: {
   myLeaves: Entry[]
   myRequests: StaffRequest[]
   incomingSwapRequests: StaffRequest[]
-  changeForm: { date: string; fromCode: string; toCode: string; changeWith: string; reason: string }
-  setChangeForm: React.Dispatch<
-    React.SetStateAction<{
-      date: string
-      fromCode: string
-      toCode: string
-      changeWith: string
-      reason: string
-    }>
-  >
-  onSubmitChange: () => void
   onRespondSwap: (requestId: string, accept: boolean) => void
-  codeForMyDay: (ymd: string) => string
+  onUploadRequestDocument: (requestId: string, file: File) => void
+  onCancelAttendanceRequest: (requestId: string) => void
 }) {
   const {
     me,
     myLeaves,
     myRequests,
     incomingSwapRequests,
-    changeForm,
-    setChangeForm,
-    onSubmitChange,
     onRespondSwap,
-    codeForMyDay,
+    onUploadRequestDocument,
+    onCancelAttendanceRequest,
   } = props
+  const [expandedRequestSteppers, setExpandedRequestSteppers] = useState<Set<string>>(new Set())
+  const todayYmd = toYmd(new Date())
 
   return (
     <div className="d-flex flex-column gap-3">
-      <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
-          <div className="card-body">
-            <h2 className="h6 fw-semibold mb-3 d-flex align-items-center gap-2">
-              <span
-                className="d-inline-flex align-items-center justify-content-center rounded"
-                style={{
-                  width: 28,
-                  height: 28,
-                  background: "#dbeafe",
-                  color: "#1d4ed8",
-                }}
-              >
-                <CalendarDays size={15} />
-              </span>
-              New roster change request
-            </h2>
-            <div className="mb-2">
-              <label className="form-label small fw-semibold">Date</label>
-              <input
-                type="date"
-                className="form-control"
-                value={changeForm.date}
-                onChange={(e) => {
-                  const date = e.target.value
-                  setChangeForm((f) => ({
-                    ...f,
-                    date,
-                    fromCode: date ? codeForMyDay(date) : "",
-                  }))
-                }}
-              />
-              {changeForm.date && changeForm.fromCode ? (
-                <div className="form-text">
-                  Currently assigned: <strong>{changeForm.fromCode}</strong>
-                </div>
-              ) : null}
-            </div>
-            <div className="row g-2">
-              <div className="col-6">
-                <label className="form-label small fw-semibold">From</label>
-                <input
-                  className="form-control"
-                  value={changeForm.fromCode}
-                  onChange={(e) =>
-                    setChangeForm((f) => ({ ...f, fromCode: e.target.value.toUpperCase() }))
-                  }
-                  placeholder="-"
-                />
-              </div>
-              <div className="col-6">
-                <label className="form-label small fw-semibold">Requested</label>
-                <input
-                  className="form-control"
-                  value={changeForm.toCode}
-                  onChange={(e) =>
-                    setChangeForm((f) => ({ ...f, toCode: e.target.value.toUpperCase() }))
-                  }
-                  placeholder="Code"
-                />
-              </div>
-            </div>
-            <div className="mt-2">
-              <label className="form-label small fw-semibold">Reason</label>
-              <textarea
-                className="form-control"
-                rows={2}
-                value={changeForm.reason}
-                onChange={(e) =>
-                  setChangeForm((f) => ({ ...f, reason: e.target.value }))
-                }
-              />
-            </div>
-            <button className="btn btn-primary mt-3 w-100" onClick={onSubmitChange}>
-              <Send size={14} className="me-1" /> Submit change request
-            </button>
-          </div>
-        </div>
-
       <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
         <div className="card-body">
           <h2 className="h6 fw-semibold mb-3 d-flex align-items-center gap-2">
@@ -2536,14 +2848,6 @@ function LeaveView(props: {
           ) : (
             <ul className="list-unstyled mb-0 d-flex flex-column gap-2">
               {myRequests.map((req) => {
-                const statusCls =
-                  req.status === "Approved"
-                    ? "bg-success-subtle text-success-emphasis"
-                    : req.status === "Rejected"
-                      ? "bg-danger-subtle text-danger-emphasis"
-                      : req.status === "Pending Peer Acceptance"
-                        ? "bg-info-subtle text-info-emphasis"
-                        : "bg-warning-subtle text-warning-emphasis"
                 return (
                   <li
                     key={req.id}
@@ -2554,16 +2858,28 @@ function LeaveView(props: {
                       <span className="fw-semibold small d-flex align-items-center gap-2">
                         {req.type === "Leave" ? (
                           <Plane size={13} color="#1d4ed8" />
+                        ) : req.type === "Attendance" ? (
+                          <Activity size={13} color="#1d4ed8" />
                         ) : (
                           <CalendarDays size={13} color="#1d4ed8" />
                         )}
-                        {req.type === "Leave" ? "Leave" : "Roster change"}
+                        {req.type === "Leave"
+                          ? "Leave"
+                          : req.type === "Attendance"
+                            ? "Attendance"
+                            : "Roster change"}
                       </span>
-                      <span className={`badge ${statusCls}`}>{req.status}</span>
+                      <span className="badge" style={requestStatusBadgeStyle(req.status)}>
+                        {req.status}
+                      </span>
                     </div>
                     {req.type === "Leave" ? (
                       <div className="text-muted small">
                         {req.leavePolicyName || "Leave"} · {req.fromDate} → {req.toDate}
+                      </div>
+                    ) : req.type === "Attendance" ? (
+                      <div className="text-muted small">
+                        {req.dutyMarkType || req.leavePolicyName || "Attendance"} · {req.fromDate} → {req.toDate}
                       </div>
                     ) : (
                       <div className="text-muted small">
@@ -2580,6 +2896,100 @@ function LeaveView(props: {
                     ) : null}
                     {req.reason ? (
                       <div className="small mt-1">{req.reason}</div>
+                    ) : null}
+                    {(() => {
+                      const anchorDate = (req.fromDate || req.date || "").trim()
+                      const canCancel =
+                        req.type === "Attendance" &&
+                        req.status !== "Approved" &&
+                        req.status !== "Rejected" &&
+                        req.status !== "Cancelled" &&
+                        Boolean(anchorDate) &&
+                        anchorDate >= todayYmd
+                      if (!canCancel) return null
+                      return (
+                        <div className="mt-2">
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-danger"
+                            onClick={() => onCancelAttendanceRequest(req.id)}
+                          >
+                            Cancel Request
+                          </button>
+                        </div>
+                      )
+                    })()}
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-secondary"
+                        onClick={() =>
+                          setExpandedRequestSteppers((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(req.id)) next.delete(req.id)
+                            else next.add(req.id)
+                            return next
+                          })
+                        }
+                      >
+                        {expandedRequestSteppers.has(req.id)
+                          ? "Collapse Process"
+                          : "Expand Process"}
+                      </button>
+                    </div>
+                    {expandedRequestSteppers.has(req.id) ? (
+                      <div className="mt-2 border rounded p-2 bg-white">
+                        <Box sx={{ maxWidth: 420 }}>
+                          <Stepper
+                            activeStep={getPortalRequestStepIndex(req.status)}
+                            orientation="vertical"
+                            sx={workflowStepperSx}
+                          >
+                            <Step>
+                              <StepLabel>Submitted</StepLabel>
+                            </Step>
+                            <Step>
+                              <StepLabel>Document Stage</StepLabel>
+                            </Step>
+                            <Step>
+                              <StepLabel>Approval Stage</StepLabel>
+                            </Step>
+                            <Step>
+                              <StepLabel>
+                                {(req.status || "").trim().toLowerCase() === "rejected"
+                                  ? "Final: Rejected"
+                                  : (req.status || "").trim().toLowerCase() === "cancelled"
+                                    ? "Final: Cancelled"
+                                  : (req.status || "").trim().toLowerCase() === "approved"
+                                    ? "Final: Approved"
+                                    : "Final: Pending"}
+                              </StepLabel>
+                            </Step>
+                          </Stepper>
+                        </Box>
+                      </div>
+                    ) : null}
+                    {req.status === "Pending Document" ? (
+                      <div className="mt-2">
+                        <label className="btn btn-sm btn-outline-primary mb-0">
+                          Upload Document
+                          <input
+                            type="file"
+                            className="d-none"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0]
+                              if (!file) return
+                              onUploadRequestDocument(req.id, file)
+                              e.currentTarget.value = ""
+                            }}
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                    {req.documentName ? (
+                      <div className="small text-muted mt-1">
+                        Document: {req.documentName}
+                      </div>
                     ) : null}
                   </li>
                 )

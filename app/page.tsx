@@ -34,7 +34,12 @@ import { Button } from "@/components/ui/button"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { createClient as createSupabaseClient } from "@/utils/supabase/client"
 import { DataGrid, type GridColDef, type GridRenderCellParams } from "@mui/x-data-grid"
+import Box from "@mui/material/Box"
+import Stepper from "@mui/material/Stepper"
+import Step from "@mui/material/Step"
+import StepLabel from "@mui/material/StepLabel"
 import OpsControlTimeline, { type FlightEntry } from "@/components/ops-control-timeline"
+import AircraftReportModule from "@/components/aircraft-report-module"
 
 type ModuleKey =
   | "dashboard"
@@ -45,6 +50,7 @@ type ModuleKey =
   | "levelShiftPriority"
   | "rosterPriorityType"
   | "opsControl"
+  | "aircraftReport"
   | "leaveAttendanceControl"
   | "publicHolidays"
   | "leaves"
@@ -112,8 +118,15 @@ type RosterChangeRequest = {
 }
 type StaffPortalRequest = {
   id: string
-  status: "Pending Peer Acceptance" | "Pending Approval" | "Approved" | "Rejected"
-  type: "Leave" | "Roster Change"
+  status:
+    | "Pending Peer Acceptance"
+    | "Pending Approval"
+    | "Pending Document"
+    | "Document Submitted"
+    | "Approved"
+    | "Cancelled"
+    | "Rejected"
+  type: "Leave" | "Attendance" | "Roster Change"
   staffNo?: string
   staffName?: string
   date?: string
@@ -122,6 +135,14 @@ type StaffPortalRequest = {
   changeWithStaffNo?: string
   changeWithStaffName?: string
   reason?: string
+  dutyMarkType?: string
+  leavePolicyName?: string
+  fromDate?: string
+  toDate?: string
+  noOfDays?: string
+  documentName?: string
+  documentData?: string
+  documentUploadedAt?: string
 }
 
 type FieldType =
@@ -151,31 +172,109 @@ type ModuleConfig = {
 }
 
 const STORAGE_KEY = "occfloat.v1"
+const AUTH_CACHE_KEY = "occfloat.authCache.v1"
 const AUTH_STORAGE_KEY = "occfloat.mainAuthStaffId"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
 const SUPABASE_ROSTER_AUDIT_TABLE = "occfloat_roster_audit_logs"
+const STEP_COLORS = {
+  active: "#0d6efd",
+  completed: "#198754",
+  pending: "#adb5bd",
+}
+
+function getAttendanceStepIndexFromForm(form: Record<string, string>): number {
+  const status = (form.status || "").trim().toLowerCase()
+  const workflow = (form.workflowStatus || "").trim().toLowerCase()
+  const approval = (form.approvalStatus || "").trim().toLowerCase()
+  const documentStatus = (form.documentStatus || "").trim().toLowerCase()
+  if (status === "rejected" || workflow === "rejected") return 3
+  if (status === "approved" || workflow === "approved" || approval === "approved") return 3
+  if (
+    workflow.includes("approval") ||
+    approval.includes("pending") ||
+    status.includes("pending approval")
+  ) {
+    return 2
+  }
+  if (
+    workflow.includes("document") ||
+    documentStatus.includes("request") ||
+    documentStatus.includes("submitted") ||
+    status.includes("document")
+  ) {
+    return 1
+  }
+  return 0
+}
+
+const workflowStepperSx = {
+  "& .MuiStepLabel-label": { fontSize: 13, color: "#6c757d" },
+  "& .MuiStepLabel-label.Mui-active": { color: "#0d6efd", fontWeight: 600 },
+  "& .MuiStepLabel-label.Mui-completed": { color: "#198754", fontWeight: 600 },
+  "& .MuiStepIcon-root": { color: STEP_COLORS.pending },
+  "& .MuiStepIcon-root.Mui-active": { color: STEP_COLORS.active },
+  "& .MuiStepIcon-root.Mui-completed": { color: STEP_COLORS.completed },
+}
+
+function attendanceStatusStyle(value: string): React.CSSProperties {
+  const v = (value || "").trim().toLowerCase()
+  if (v.includes("approved")) return { background: "#d1e7dd", color: "#0f5132" }
+  if (v.includes("rejected")) return { background: "#f8d7da", color: "#842029" }
+  if (v.includes("document") || v.includes("request")) {
+    return { background: "#fff3cd", color: "#664d03" }
+  }
+  if (v.includes("approval") || v.includes("pending")) {
+    return { background: "#cff4fc", color: "#055160" }
+  }
+  return { background: "#e2e3e5", color: "#41464b" }
+}
 const ACCESS_CONTROL_FLOWS = [
-  "Dashboard View",
-  "Create Staff",
-  "Staff Level",
-  "Leave Type",
-  "Public Holidays",
-  "Staff Leave",
-  "Attendance",
-  "Evaluation",
-  "Roster View",
-  "Roster Generate",
-  "Roster Download",
-  "Roster Upload",
-  "Shift Setup",
-  "Level Shift Priority",
-  "Roster Priority Type",
-  "Daily Checklist",
-  "Briefing",
-  "Role Management",
-  "User Management",
+  "Dashboard > View",
+
+  "Staff > Create Staff > View",
+  "Staff > Create Staff > Edit",
+  "Staff > Staff Level > View",
+  "Staff > Staff Level > Edit",
+  "Staff > Leave Type > View",
+  "Staff > Leave Type > Edit",
+  "Staff > Public Holidays > View",
+  "Staff > Public Holidays > Edit",
+  "Staff > Staff Leave > View",
+  "Staff > Staff Leave > Edit",
+  "Staff > Attendance > View",
+  "Staff > Attendance > Edit",
+  "Staff > Evaluation > View",
+  "Staff > Evaluation > Edit",
+
+  "Roster > Roster > View",
+  "Roster > Roster > Generate",
+  "Roster > Roster > Download",
+  "Roster > Roster > Upload",
+  "Roster > Roster > Edit",
+  "Roster > Roster Approvals > View",
+  "Roster > Roster Approvals > Edit",
+  "Roster > Shift Setup > View",
+  "Roster > Shift Setup > Edit",
+  "Roster > Level Shift Priority > View",
+  "Roster > Level Shift Priority > Edit",
+  "Roster > Roster Priority Type > View",
+  "Roster > Roster Priority Type > Edit",
+
+  "Daily Ops > Ops Control > View",
+  "Daily Ops > Ops Control > Edit",
+  "Daily Ops > Aircraft Report > View",
+  "Daily Ops > Aircraft Report > Edit",
+  "Daily Ops > Daily Checklist > View",
+  "Daily Ops > Daily Checklist > Edit",
+  "Daily Ops > Briefing > View",
+  "Daily Ops > Briefing > Edit",
+
+  "Admin > Role Management > View",
+  "Admin > Role Management > Edit",
+  "Admin > User Management > View",
+  "Admin > User Management > Edit",
 ]
 
 const MODULES: ModuleConfig[] = [
@@ -616,24 +715,61 @@ const MODULES: ModuleConfig[] = [
     columns: [],
   },
   {
+    key: "aircraftReport",
+    title: "Aircraft Report",
+    description: "Aircraft utilization reporting dashboard with filters and analytics.",
+    fields: [],
+    columns: [],
+  },
+  {
     key: "attendance",
     title: "Attendance",
-    description: "Capture daily attendance and absentee details.",
+    description: "Review attendance requests from staff portal and process approvals/documents.",
     fields: [
       { key: "date", label: "Date", type: "date", required: true },
+      { key: "fromDate", label: "Requested From", type: "date" },
+      { key: "toDate", label: "Requested To", type: "date" },
+      { key: "noOfDays", label: "No of Days", type: "number" },
+      { key: "attendanceType", label: "Attendance Type", type: "text" },
+      { key: "staffNo", label: "Staff No", type: "text" },
       { key: "staffName", label: "Staff Name", type: "text", required: true },
       {
         key: "status",
         label: "Status",
         type: "select",
-        options: ["Present", "Late", "Absent", "On Leave"],
+        options: [
+          "Pending",
+          "Pending Document Upload",
+          "Pending Approval",
+          "Approved",
+          "Rejected",
+          "Present",
+          "Late",
+          "Absent",
+          "On Leave",
+        ],
         required: true,
       },
+      { key: "workflowStatus", label: "Workflow", type: "text" },
+      { key: "approvalStatus", label: "Approval", type: "text" },
+      { key: "documentStatus", label: "Document", type: "text" },
+      { key: "requestSource", label: "Source", type: "text" },
       { key: "checkIn", label: "Check In", type: "time" },
-      { key: "checkOut", label: "Check Out", type: "time" },
       { key: "remarks", label: "Remarks", type: "textarea" },
     ],
-    columns: ["date", "staffName", "status", "checkIn", "checkOut", "remarks"],
+    columns: [
+      "date",
+      "staffNo",
+      "staffName",
+      "attendanceType",
+      "fromDate",
+      "toDate",
+      "noOfDays",
+      "status",
+      "documentName",
+      "requestSource",
+      "remarks",
+    ],
   },
   {
     key: "evaluation",
@@ -724,6 +860,7 @@ const NAV_GROUPS: NavGroup[] = [
     icon: Activity,
     items: [
       { key: "opsControl", label: "Ops Control", icon: Settings },
+      { key: "aircraftReport", label: "Aircraft Report", icon: TrendingUp },
       { key: "checklist", label: "Daily Checklist", icon: ListChecks },
       { key: "briefing", label: "Briefing", icon: Megaphone },
     ],
@@ -748,6 +885,7 @@ function getEmptyStore(): DataStore {
     levelShiftPriority: [],
     rosterPriorityType: [],
     opsControl: [],
+    aircraftReport: [],
     leaveAttendanceControl: [],
     publicHolidays: [],
     leaves: [],
@@ -758,6 +896,20 @@ function getEmptyStore(): DataStore {
     evaluation: [],
     checklist: [],
     briefing: [],
+  }
+}
+
+function compactStoreForLocal(storage: DataStore): DataStore {
+  const MAX_LOCAL_OPS_ROWS = 800
+  const compactOps = (storage.opsControl || [])
+    .slice(-MAX_LOCAL_OPS_ROWS)
+    .map((row) => ({
+      ...row,
+      remarks: String(row.remarks || "").slice(0, 120),
+    }))
+  return {
+    ...storage,
+    opsControl: compactOps,
   }
 }
 
@@ -891,6 +1043,17 @@ function formatDateText(value: string): string {
   return value.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (_m, y, m, d) => {
     return `${d}/${m}/${String(y).slice(-2)}`
   })
+}
+
+function isDateLikeColumn(column: string): boolean {
+  const key = column.toLowerCase()
+  return (
+    key.includes("date") ||
+    key.includes("time") ||
+    key.endsWith("at") ||
+    key === "from" ||
+    key === "to"
+  )
 }
 
 function getDateRangeInclusive(fromDate: string, toDate: string): Date[] {
@@ -1154,7 +1317,21 @@ export default function Page() {
               ...getEmptyStore(),
               ...parsed,
             })
-            window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+            try {
+              window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+            } catch {
+              try {
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(parsed)))
+              } catch {
+                window.localStorage.setItem(
+                  STORAGE_KEY,
+                  JSON.stringify({
+                    ...parsed,
+                    opsControl: [],
+                  }),
+                )
+              }
+            }
             setSyncStatus("synced")
           }
           loaded = true
@@ -1201,7 +1378,32 @@ export default function Page() {
 
   useEffect(() => {
     if (!hydrated || !hasLoadedRef.current) return
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    } catch {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(store)))
+      } catch {
+        window.localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            ...store,
+            opsControl: [],
+          }),
+        )
+      }
+    }
+    try {
+      window.localStorage.setItem(
+        AUTH_CACHE_KEY,
+        JSON.stringify({
+          staff: store.staff || [],
+          userManagement: store.userManagement || [],
+        }),
+      )
+    } catch {
+      // non-blocking
+    }
 
     if (!supabase || disableRemoteSyncRef.current) return
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -3296,6 +3498,22 @@ export default function Page() {
         resolvedForm.rosterPriorityNumbers = priorityOptions[0]
       }
     }
+    if (activeConfig.key === "userManagement") {
+      const roleOptions = Array.from(
+        new Set(
+          store.roleManagement
+            .map((entry) => (entry.roleName || "").trim())
+            .filter((item): item is string => Boolean(item)),
+        ),
+      )
+      if (roleOptions.length === 0) {
+        window.alert('Please create at least one role in "Role Management" before creating users.')
+        return
+      }
+      if (!resolvedForm.roleName?.trim()) {
+        resolvedForm.roleName = roleOptions[0]
+      }
+    }
 
     const missing = activeConfig.fields.find(
       (field) =>
@@ -3692,7 +3910,7 @@ export default function Page() {
     const entry: Entry = {
       id: editingEntryId ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       createdAt: new Date().toISOString(),
-      ...currentForm,
+      ...resolvedForm,
     }
 
     setStore((prev) => ({
@@ -3836,6 +4054,28 @@ export default function Page() {
       }
     })
   }, [store.levels, store.staff, store.shift])
+
+  useEffect(() => {
+    const roleOptions = Array.from(
+      new Set(
+        store.roleManagement
+          .map((entry) => (entry.roleName || "").trim())
+          .filter((item): item is string => Boolean(item)),
+      ),
+    )
+    if (roleOptions.length === 0) return
+    setForms((prev) => {
+      const currentRole = (prev.userManagement.roleName || "").trim()
+      if (currentRole) return prev
+      return {
+        ...prev,
+        userManagement: {
+          ...prev.userManagement,
+          roleName: roleOptions[0],
+        },
+      }
+    })
+  }, [store.roleManagement])
 
   const removeEntry = (moduleKey: ModuleKey, entryId: string) => {
     setStore((prev) => ({
@@ -4841,73 +5081,195 @@ export default function Page() {
     const importPortalRosterRequests = () => {
       try {
         const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
-        if (!raw) return
-        const requests = JSON.parse(raw) as StaffPortalRequest[]
+        const localRequests = raw ? (JSON.parse(raw) as StaffPortalRequest[]) : []
+        const mirroredRequests = (((store as unknown as Record<string, unknown>).__staffPortalRequests) || []) as StaffPortalRequest[]
+        const requests = Array.isArray(localRequests) ? [...localRequests] : []
+        if (Array.isArray(mirroredRequests)) {
+          const seen = new Set(requests.map((r) => r.id))
+          mirroredRequests.forEach((r) => {
+            if (!r?.id || seen.has(r.id)) return
+            requests.push(r)
+            seen.add(r.id)
+          })
+        }
         if (!Array.isArray(requests)) return
         const pendingRoster = requests.filter(
           (r) => r.type === "Roster Change" && r.status === "Pending Approval" && r.date,
         )
-        if (pendingRoster.length === 0) return
 
         const existingReqIds = new Set(rosterChangeRequests.map((r) => r.id))
         const existingLogIds = new Set(rosterChangeLogs.map((l) => l.id))
         const toAddReq: RosterChangeRequest[] = []
         const toAddLog: RosterChangeLog[] = []
 
-        pendingRoster.forEach((r) => {
-          if (!r.id || existingReqIds.has(r.id)) return
-          const level =
-            store.staff.find(
-              (s) =>
-                (s.staffNo || "").trim() === (r.staffNo || "").trim() &&
-                (s.fullName || "").trim() === (r.staffName || "").trim(),
-            )?.level || ""
-          const mappedReq: RosterChangeRequest = {
-            id: r.id,
-            createdAt: new Date().toISOString(),
-            status: "Pending Approval",
-            changeType: r.changeWithStaffNo ? "Mutual Swap" : "Shift Reassign",
-            date: r.date || "",
-            staffNo: r.staffNo || "",
-            staffName: r.staffName || "",
-            level,
-            fromCode: (r.fromCode || "-").toUpperCase(),
-            toCode: (r.toCode || "-").toUpperCase(),
-            targetStaffNo: r.changeWithStaffNo || "",
-            targetStaffName: r.changeWithStaffName || "",
-            conflictStaffNo: "",
-            conflictStaffName: "",
-            conflictFromCode: "",
-            conflictToCode: "",
-            reason: r.reason || "Staff portal request",
-          }
-          toAddReq.push(mappedReq)
+        if (pendingRoster.length > 0) {
+          pendingRoster.forEach((r) => {
+            if (!r.id || existingReqIds.has(r.id)) return
+            const level =
+              store.staff.find(
+                (s) =>
+                  (s.staffNo || "").trim() === (r.staffNo || "").trim() &&
+                  (s.fullName || "").trim() === (r.staffName || "").trim(),
+              )?.level || ""
+            const mappedReq: RosterChangeRequest = {
+              id: r.id,
+              createdAt: new Date().toISOString(),
+              status: "Pending Approval",
+              changeType: r.changeWithStaffNo ? "Mutual Swap" : "Shift Reassign",
+              date: r.date || "",
+              staffNo: r.staffNo || "",
+              staffName: r.staffName || "",
+              level,
+              fromCode: (r.fromCode || "-").toUpperCase(),
+              toCode: (r.toCode || "-").toUpperCase(),
+              targetStaffNo: r.changeWithStaffNo || "",
+              targetStaffName: r.changeWithStaffName || "",
+              conflictStaffNo: "",
+              conflictStaffName: "",
+              conflictFromCode: "",
+              conflictToCode: "",
+              reason: r.reason || "Staff portal request",
+            }
+            toAddReq.push(mappedReq)
 
-          const portalLogId = `portal-submit-${r.id}`
-          if (!existingLogIds.has(portalLogId)) {
-            toAddLog.push({
-              id: portalLogId,
-              at: new Date().toISOString(),
-              requestedBy: `${r.staffNo || ""}${r.staffName ? ` - ${r.staffName}` : ""}`.trim() || "Staff Portal",
-              date: mappedReq.date,
-              staffNo: mappedReq.staffNo,
-              staffName: mappedReq.staffName,
-              type: "Roster Manual Change",
-              action: "Change Submitted",
-              details:
-                mappedReq.changeType === "Mutual Swap"
-                  ? `Pending: Swap with ${mappedReq.targetStaffNo} - ${mappedReq.targetStaffName}`
-                  : `Pending: ${mappedReq.fromCode || "-"} -> ${mappedReq.toCode || "-"}`,
-              reason: mappedReq.reason || "-",
-            })
-          }
-        })
+            const portalLogId = `portal-submit-${r.id}`
+            if (!existingLogIds.has(portalLogId)) {
+              toAddLog.push({
+                id: portalLogId,
+                at: new Date().toISOString(),
+                requestedBy: `${r.staffNo || ""}${r.staffName ? ` - ${r.staffName}` : ""}`.trim() || "Staff Portal",
+                date: mappedReq.date,
+                staffNo: mappedReq.staffNo,
+                staffName: mappedReq.staffName,
+                type: "Roster Manual Change",
+                action: "Change Submitted",
+                details:
+                  mappedReq.changeType === "Mutual Swap"
+                    ? `Pending: Swap with ${mappedReq.targetStaffNo} - ${mappedReq.targetStaffName}`
+                    : `Pending: ${mappedReq.fromCode || "-"} -> ${mappedReq.toCode || "-"}`,
+                reason: mappedReq.reason || "-",
+              })
+            }
+          })
+        }
 
         if (toAddReq.length > 0) {
           setRosterChangeRequests((prev) => [...toAddReq, ...prev])
         }
         if (toAddLog.length > 0) {
           setRosterChangeLogs((prev) => [...toAddLog, ...prev].slice(0, 800))
+        }
+
+        // Import staff-portal duty mark requests into Attendance queue.
+        const normAttendanceName = (v: string) =>
+          (v || "")
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "")
+        const attendanceTypeNames = new Set(
+          store.leaveAttendanceControl
+            .filter((x) => (x.leaveAttendanceType || "").trim().toLowerCase() === "attendance")
+            .map((x) => normAttendanceName(x.leaveAttendanceName || ""))
+            .filter(Boolean),
+        )
+        // Fallback common duty-mark names to avoid missing imports due to
+        // spelling/spacing variations in policy setup.
+        const attendanceFallback = new Set([
+          "medical",
+          "sickleave",
+          "familyresponsibleleave",
+          "familyresposbileleave",
+        ])
+        const attendanceReqs = requests.filter((r) => {
+          if (r.type !== "Leave" && r.type !== "Attendance") return false
+          const status = (r.status || "").trim().toLowerCase()
+          if (
+            status !== "pending" &&
+            status !== "pending approval" &&
+            status !== "pending peer acceptance" &&
+            status !== "pending document" &&
+            status !== "document submitted"
+          ) {
+            return false
+          }
+          const name = normAttendanceName(r.dutyMarkType || r.leavePolicyName || "")
+          if (!name) return false
+          if (name.includes("medical") || name.includes("sick") || name.includes("family")) {
+            return true
+          }
+          if (attendanceTypeNames.size === 0) return attendanceFallback.has(name)
+          return attendanceTypeNames.has(name) || attendanceFallback.has(name)
+        })
+        const cancelledAttendanceReqIds = new Set(
+          requests
+            .filter((r) => (r.type === "Leave" || r.type === "Attendance") && r.status === "Cancelled")
+            .map((r) => (r.id || "").trim())
+            .filter(Boolean),
+        )
+        if (attendanceReqs.length > 0 || cancelledAttendanceReqIds.size > 0) {
+          setStore((prev) => {
+            const existingReqIds = new Set(prev.attendance.map((a) => (a.portalRequestId || "").trim()))
+            const existingByReqId = new Map<string, Entry>()
+            prev.attendance.forEach((a) => {
+              const id = (a.portalRequestId || "").trim()
+              if (id) existingByReqId.set(id, a)
+            })
+            const additions: Entry[] = []
+            attendanceReqs.forEach((r) => {
+              if (!r.id || existingReqIds.has(r.id)) return
+              additions.push({
+                id: `att_portal_${r.id}`,
+                createdAt: new Date().toISOString(),
+                date: r.fromDate || r.date || "",
+                fromDate: r.fromDate || "",
+                toDate: r.toDate || r.fromDate || "",
+                noOfDays: r.noOfDays || "",
+                staffNo: r.staffNo || "",
+                staffName: r.staffName || "",
+                attendanceType: r.dutyMarkType || r.leavePolicyName || "",
+                status: "Pending",
+                workflowStatus: "Pending",
+                approvalStatus: "Pending",
+                documentStatus: "Not Required",
+                documentName: r.documentName || "",
+                requestSource: "Staff Portal",
+                portalRequestId: r.id,
+                remarks: r.reason || "Duty mark request from staff portal",
+              })
+            })
+            const updated = prev.attendance.map((a) => {
+              const reqId = (a.portalRequestId || "").trim()
+              if (!reqId) return a
+              if (cancelledAttendanceReqIds.has(reqId)) {
+                return {
+                  ...a,
+                  status: "Cancelled",
+                  workflowStatus: "Cancelled",
+                  approvalStatus: "Cancelled",
+                  remarks: a.remarks || "Cancelled by staff before approval",
+                }
+              }
+              const req = attendanceReqs.find((x) => x.id === reqId)
+              if (!req) return a
+              const nextStatus =
+                req.status === "Pending Document"
+                  ? "Pending Document Upload"
+                  : req.status === "Document Submitted"
+                    ? "Pending Approval"
+                    : req.status || a.status
+              return {
+                ...a,
+                status: nextStatus,
+                workflowStatus: req.status || a.workflowStatus,
+                documentStatus: req.documentName ? "Submitted" : a.documentStatus,
+                documentName: req.documentName || a.documentName || "",
+                documentData: req.documentData || a.documentData || "",
+                remarks: a.remarks || req.reason || "",
+              }
+            })
+            if (additions.length === 0) return { ...prev, attendance: updated }
+            return { ...prev, attendance: [...additions, ...updated] }
+          })
         }
       } catch {
         // Ignore malformed portal request payloads.
@@ -4919,16 +5281,33 @@ export default function Page() {
     const onStorage = (event: StorageEvent) => {
       if (event.key === STAFF_PORTAL_REQUESTS_KEY) importPortalRosterRequests()
     }
+    // Same-tab navigations don't fire the storage event, so also re-poll
+    // whenever the tab becomes visible or regains focus — covers the case
+    // of switching from /staff-portal back to / in the same tab.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") importPortalRosterRequests()
+    }
+    const onFocus = () => importPortalRosterRequests()
     window.addEventListener("storage", onStorage)
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", onFocus)
     return () => {
       window.clearInterval(intervalId)
       window.removeEventListener("storage", onStorage)
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", onFocus)
     }
-  }, [hydrated, rosterChangeRequests, rosterChangeLogs, store.staff])
+  }, [hydrated, rosterChangeRequests, rosterChangeLogs, store.staff, store.leaveAttendanceControl])
 
   const syncStaffPortalRequestStatus = (
     requestId: string,
-    status: "Approved" | "Rejected",
+    status:
+      | "Pending Document"
+      | "Pending Approval"
+      | "Approved"
+      | "Rejected"
+      | "Document Submitted"
+      | "Cancelled",
   ) => {
     try {
       const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
@@ -4937,8 +5316,209 @@ export default function Page() {
       if (!Array.isArray(requests)) return
       const next = requests.map((r) => (r.id === requestId ? { ...r, status } : r))
       window.localStorage.setItem(STAFF_PORTAL_REQUESTS_KEY, JSON.stringify(next))
+      if (supabase && !disableRemoteSyncRef.current) {
+        void (async () => {
+          try {
+            const { data } = await supabase
+              .from(SUPABASE_STORE_TABLE)
+              .select("payload")
+              .eq("id", SUPABASE_STORE_ID)
+              .maybeSingle()
+            const payload =
+              data?.payload && typeof data.payload === "object"
+                ? ({ ...(data.payload as Record<string, unknown>) } as Record<string, unknown>)
+                : {}
+            const mirror = Array.isArray(payload.__staffPortalRequests)
+              ? (payload.__staffPortalRequests as StaffPortalRequest[])
+              : []
+            const mirroredNext = mirror.map((r) => (r.id === requestId ? { ...r, status } : r))
+            payload.__staffPortalRequests = mirroredNext
+            await supabase.from(SUPABASE_STORE_TABLE).upsert({
+              id: SUPABASE_STORE_ID,
+              payload,
+              updated_at: new Date().toISOString(),
+            })
+          } catch {
+            // Non-blocking.
+          }
+        })()
+      }
     } catch {
       // Ignore malformed portal request payloads.
+    }
+  }
+
+  const markAttendanceSubmitDocument = (entryId: string) => {
+    let reqId = ""
+    setStore((prev) => ({
+      ...prev,
+      attendance: prev.attendance.map((a) => {
+        if (a.id !== entryId) return a
+        reqId = a.portalRequestId || ""
+        return {
+          ...a,
+          workflowStatus: "Pending Document",
+          documentStatus: "Requested",
+          status: "Pending Document Upload",
+        }
+      }),
+    }))
+    if (reqId) syncStaffPortalRequestStatus(reqId, "Pending Document")
+  }
+
+  const markAttendanceProceedApproval = (entryId: string) => {
+    let reqId = ""
+    setStore((prev) => ({
+      ...prev,
+      attendance: prev.attendance.map((a) => {
+        if (a.id !== entryId) return a
+        reqId = a.portalRequestId || ""
+        return {
+          ...a,
+          workflowStatus: "Pending Approval",
+          approvalStatus: "Pending",
+          status: "Pending Approval",
+        }
+      }),
+    }))
+    if (reqId) syncStaffPortalRequestStatus(reqId, "Pending Approval")
+  }
+
+  const approveAttendanceRequest = (entryId: string) => {
+    let reqId = ""
+    setStore((prev) => ({
+      ...prev,
+      attendance: prev.attendance.map((a) => {
+        if (a.id !== entryId) return a
+        reqId = a.portalRequestId || ""
+        return {
+          ...a,
+          status: "Approved",
+          workflowStatus: "Approved",
+          approvalStatus: "Approved",
+        }
+      }),
+    }))
+    if (reqId) syncStaffPortalRequestStatus(reqId, "Approved")
+  }
+
+  const rejectAttendanceRequest = (entryId: string) => {
+    const reason = window.prompt("Enter reject remarks", "")?.trim() || ""
+    let reqId = ""
+    setStore((prev) => ({
+      ...prev,
+      attendance: prev.attendance.map((a) => {
+        if (a.id !== entryId) return a
+        reqId = a.portalRequestId || ""
+        return {
+          ...a,
+          status: "Rejected",
+          workflowStatus: "Rejected",
+          approvalStatus: "Rejected",
+          remarks: reason || a.remarks || "",
+        }
+      }),
+    }))
+    if (reqId) syncStaffPortalRequestStatus(reqId, "Rejected")
+  }
+
+  const backfillAttendanceFromPortal = () => {
+    try {
+      const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
+      if (!raw) {
+        window.alert(
+          "No staff portal requests found in this browser's localStorage.\n\n" +
+            "If you submitted the duty mark on a different device, the staff " +
+            "portal data is not synced across devices. Open the staff portal " +
+            "in this same browser and re-submit the duty mark.",
+        )
+        return
+      }
+      const requests = JSON.parse(raw) as StaffPortalRequest[]
+      if (!Array.isArray(requests)) {
+        window.alert("Invalid staff portal request payload.")
+        return
+      }
+      const normalizeName = (v: string) =>
+        (v || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "")
+      const totalRequests = requests.length
+      const leaveRequests = requests.filter((r) => r.type === "Leave")
+      const attendanceRequests = requests.filter((r) => r.type === "Attendance")
+      const candidates = requests.filter((r) => {
+        if (r.type !== "Leave" && r.type !== "Attendance") return false
+        const status = (r.status || "").trim().toLowerCase()
+        if (status === "approved" || status === "rejected" || status === "cancelled") return false
+        const n = normalizeName(r.dutyMarkType || r.leavePolicyName || "")
+        return n.includes("medical") || n.includes("sick") || n.includes("family")
+      })
+      if (candidates.length === 0) {
+        window.alert(
+          `No pending duty mark requests found for attendance backfill.\n\n` +
+            `Diagnostic:\n` +
+            `  • Total staff-portal requests in storage: ${totalRequests}\n` +
+            `  • Of which type=Leave: ${leaveRequests.length}\n` +
+            `  • Of which type=Attendance: ${attendanceRequests.length}\n` +
+            `  • Of which match duty-mark types (Medical / Sick / Family): 0\n\n` +
+            `If you expected to see duty marks here, check that the request was ` +
+            `submitted from the staff portal in this same browser.`,
+        )
+        return
+      }
+      let added = 0
+      let alreadyImported = 0
+      setStore((prev) => {
+        const existingReqIds = new Set(prev.attendance.map((a) => (a.portalRequestId || "").trim()))
+        const additions: Entry[] = []
+        candidates.forEach((r) => {
+          if (!r.id) return
+          if (existingReqIds.has(r.id)) {
+            alreadyImported += 1
+            return
+          }
+          additions.push({
+            id: `att_backfill_${r.id}`,
+            createdAt: new Date().toISOString(),
+            date: r.fromDate || r.date || "",
+            fromDate: r.fromDate || "",
+            toDate: r.toDate || r.fromDate || "",
+            noOfDays: r.noOfDays || "",
+            staffNo: r.staffNo || "",
+            staffName: r.staffName || "",
+            attendanceType: r.dutyMarkType || r.leavePolicyName || "",
+            status: "Pending",
+            workflowStatus: "Pending",
+            approvalStatus: "Pending",
+            documentStatus: "Not Required",
+            requestSource: "Staff Portal",
+            portalRequestId: r.id,
+            remarks: r.reason || "Duty mark request backfilled from staff portal",
+          })
+        })
+        added = additions.length
+        if (added === 0) return prev
+        return { ...prev, attendance: [...additions, ...prev.attendance] }
+      })
+      window.setTimeout(() => {
+        const lines: string[] = []
+        lines.push(`Backfill summary:`)
+        lines.push(`  • Duty mark candidates in portal: ${candidates.length}`)
+        lines.push(`  • Already in attendance (skipped): ${alreadyImported}`)
+        lines.push(`  • Newly added to attendance: ${added}`)
+        if (added > 0) {
+          lines.push("")
+          lines.push("Refresh the Attendance grid to see the new entries.")
+        }
+        window.alert(lines.join("\n"))
+      }, 50)
+    } catch (err) {
+      window.alert(
+        `Failed to backfill attendance from staff portal requests.\n\n${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
     }
   }
   const rosterChangeConflict = useMemo(() => {
@@ -5014,6 +5594,30 @@ export default function Page() {
     setNewPassword("")
     setConfirmNewPassword("")
   }
+
+  // Deep-link support: read ?module=<key> on mount and switch to it.
+  // Keep hooks above conditional returns to preserve hook order.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const params = new URLSearchParams(window.location.search)
+    const requested = params.get("module")
+    if (!requested) return
+    const valid = MODULES.some((m) => m.key === requested)
+    if (valid && requested !== activeModule) {
+      setActiveModule(requested as ModuleKey)
+    }
+    // Run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get("module") === activeModule) return
+    params.set("module", activeModule)
+    const next = `${window.location.pathname}?${params.toString()}${window.location.hash}`
+    window.history.replaceState(null, "", next)
+  }, [activeModule])
 
   if (!hydrated) {
     return <main className="p-4">Loading OCCfloat...</main>
@@ -6028,10 +6632,21 @@ export default function Page() {
                       }))
                     }
                   />
+                ) : activeConfig.key === "aircraftReport" ? (
+                  <AircraftReportModule
+                    flights={store.opsControl as unknown as FlightEntry[]}
+                    setFlights={(next) =>
+                      setStore((prev) => ({
+                        ...prev,
+                        opsControl: next as unknown as Entry[],
+                      }))
+                    }
+                  />
                 ) : (
                   <div className="d-flex flex-column gap-3">
                     <div className="d-flex flex-wrap align-items-center gap-2">
-                      <Button
+                      {activeConfig.key !== "attendance" ? (
+                        <Button
                         onClick={() => {
                           setForms((prev) => ({
                             ...prev,
@@ -6045,6 +6660,12 @@ export default function Page() {
                       >
                         + Create {activeConfig.title} Entry
                       </Button>
+                      ) : null}
+                      {activeConfig.key === "attendance" ? (
+                        <Button variant="outline" onClick={backfillAttendanceFromPortal}>
+                          Backfill Portal Duty Marks
+                        </Button>
+                      ) : null}
                       {activeConfig.key === "publicHolidays" ? (
                         <>
                           <Button variant="outline" onClick={downloadPublicHolidayCsvTemplate}>
@@ -6162,10 +6783,24 @@ export default function Page() {
                                 if (activeConfig.key === "leaves" && column === "publicHolidayDays") {
                                   return getGovPublicHolidayDisplay(entry)
                                 }
+                                if (
+                                  activeConfig.key === "attendance" &&
+                                  (column === "status" ||
+                                    column === "workflowStatus" ||
+                                    column === "approvalStatus" ||
+                                    column === "documentStatus")
+                                ) {
+                                  return (
+                                    <span className="badge rounded-pill" style={attendanceStatusStyle(String(entry[column] || ""))}>
+                                      {String(entry[column] || "-")}
+                                    </span>
+                                  )
+                                }
                                 if (entry[column] === undefined || entry[column] === null || entry[column] === "") {
                                   return <span className="text-muted">-</span>
                                 }
-                                return formatDateText(entry[column])
+                                const raw = String(entry[column])
+                                return isDateLikeColumn(column) ? formatDateText(raw) : raw
                               },
                             })) as GridColDef[],
                             {
@@ -6204,6 +6839,39 @@ export default function Page() {
                                         Active
                                       </label>
                                     </div>
+                                  </div>
+                                ) : activeConfig.key === "attendance" ? (
+                                  <div className="d-flex gap-2">
+                                    <Button variant="ghost" size="sm" onClick={() => editEntry(activeConfig.key, entry)}>
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => markAttendanceSubmitDocument(entry.id)}
+                                    >
+                                      Set Upload Document
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => markAttendanceProceedApproval(entry.id)}
+                                    >
+                                      Set Pending Approval
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => approveAttendanceRequest(entry.id)}
+                                    >
+                                      Approve
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      onClick={() => rejectAttendanceRequest(entry.id)}
+                                    >
+                                      Reject
+                                    </Button>
                                   </div>
                                 ) : (
                                   <div className="d-flex gap-2">
@@ -6371,6 +7039,35 @@ export default function Page() {
                   />
                 </div>
                 <div className="modal-body">
+                  {activeConfig.key === "attendance" ? (
+                    <div className="mb-3 border rounded p-2 bg-body-tertiary">
+                      <div className="small fw-semibold mb-2">Request Workflow</div>
+                      <Box sx={{ maxWidth: 420 }}>
+                        <Stepper
+                          activeStep={getAttendanceStepIndexFromForm(currentForm)}
+                          orientation="vertical"
+                          sx={workflowStepperSx}
+                        >
+                          <Step>
+                            <StepLabel>Pending Request</StepLabel>
+                          </Step>
+                          <Step>
+                            <StepLabel>Document Stage</StepLabel>
+                          </Step>
+                          <Step>
+                            <StepLabel>Approval Stage</StepLabel>
+                          </Step>
+                          <Step>
+                            <StepLabel>
+                              {(currentForm.status || "").trim().toLowerCase() === "rejected"
+                                ? "Final: Rejected"
+                                : "Final: Approved"}
+                            </StepLabel>
+                          </Step>
+                        </Stepper>
+                      </Box>
+                    </div>
+                  ) : null}
                   <div className="row g-3">
                     {activeConfig.fields.map((field) => {
                       if (

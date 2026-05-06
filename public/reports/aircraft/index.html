@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aircraft Utilization Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { background:#f3f5f7; }
+    .panel { background: rgba(255,255,255,.96); }
+    .pill { border:1px solid #d1d5db; background:#e5e7eb; color:#4b5563; }
+    .pill.active { border-color:#0f766e; background:#ccfbf1; color:#134e4a; }
+    .tab-btn { border:1px solid #d6dbe3; background:#e6ebf2; color:#4b5563; }
+    .tab-btn.active { border-top:3px solid #f59e0b; background:#ffffff; color:#1f4168; font-weight:700; }
+    .hm-head { background:#1f4168; color:#e5edf8; }
+    .hm-total { background:#274e7a; color:#eaf2ff; font-weight:700; }
+    .hm-empty { background:#e5e7eb; color:#94a3b8; }
+  </style>
+</head>
+<body class="min-h-screen text-slate-800">
+  <div class="max-w-[1800px] mx-auto p-3 md:p-4">
+    <div class="grid grid-cols-1 xl:grid-cols-[280px_1fr] gap-4">
+
+      <aside class="panel rounded-xl border border-slate-200 p-3 h-[calc(100vh-2rem)] overflow-auto sticky top-4">
+        <h2 class="text-xs tracking-widest font-bold text-slate-500 mb-2">SEARCH</h2>
+        <input id="searchInput" class="w-full border rounded-md px-3 py-2 text-sm" placeholder="Search rows..." />
+
+        <h2 class="text-xs tracking-widest font-bold text-slate-500 mt-5 mb-2">DATE RANGE (DATE)</h2>
+        <input id="fromDate" type="date" class="w-full border rounded-md px-3 py-2 text-sm mb-2" />
+        <input id="toDate" type="date" class="w-full border rounded-md px-3 py-2 text-sm" />
+        <div class="mt-2">
+          <h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">QTR</h3>
+          <div id="quarterFilters" class="flex flex-wrap gap-2"></div>
+        </div>
+
+        <div class="mt-5 space-y-4">
+          <div><h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">REG</h3><div id="filterReg" class="flex flex-wrap gap-2"></div></div>
+          <div><h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">ORIGIN</h3><div id="filterOrg" class="flex flex-wrap gap-2"></div></div>
+          <div><h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">DEST</h3><div id="filterDst" class="flex flex-wrap gap-2"></div></div>
+          <div><h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">TRANSFER TYPE</h3><div id="filterType" class="flex flex-wrap gap-2"></div></div>
+          <div><h3 class="text-xs tracking-widest font-bold text-slate-500 mb-2">STATUS</h3><div id="filterStatus" class="flex flex-wrap gap-2"></div></div>
+        </div>
+      </aside>
+
+      <main class="space-y-4">
+        <header class="panel rounded-2xl shadow-sm p-4 md:p-5 border border-slate-200">
+          <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
+            <div>
+              <h1 class="text-2xl font-semibold tracking-tight">Aircraft Utilization Data Visualization</h1>
+              <p id="subtitle" class="text-slate-600 mt-1">Interactive fleet performance dashboard</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <label class="px-3 py-2 rounded-xl border border-slate-300 bg-white text-sm cursor-pointer hover:bg-slate-50">
+                Upload Flight File
+                <input id="flightFileInput" type="file" accept=".xlsx,.xls,.json" class="hidden" />
+              </label>
+              <label class="px-3 py-2 rounded-xl border border-slate-300 bg-white text-sm cursor-pointer hover:bg-slate-50">
+                Upload Crew Req
+                <input id="crewReqFileInput" type="file" accept=".xlsx,.xls" class="hidden" />
+              </label>
+              <button id="clearAll" class="px-4 py-2 rounded-xl bg-teal-700 text-white hover:bg-teal-800">Clear All Filters</button>
+            </div>
+          </div>
+        </header>
+
+        <nav id="utilTabs" class="panel rounded-xl border border-slate-200 p-2 overflow-x-auto">
+          <div class="flex min-w-max gap-2">
+            <button class="tab-btn active rounded-lg px-4 py-2" data-tab="flights">✈ Flights</button>
+            <button class="tab-btn rounded-lg px-4 py-2" data-tab="monthly">📅 Monthly Utilization</button>
+            <button class="tab-btn rounded-lg px-4 py-2" data-tab="service">🛫 Service Window</button>
+            <button class="tab-btn rounded-lg px-4 py-2" data-tab="crewdaily">👥 Crew Daily (PIC/SIC/CA)</button>
+            <button class="tab-btn rounded-lg px-4 py-2" data-tab="crewpool">📋 Crew Pool</button>
+          </div>
+        </nav>
+
+        <section class="grid grid-cols-2 md:grid-cols-4 gap-3" id="kpis"></section>
+
+        <section data-panel="flights" class="space-y-4">
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="aircraftHoursChart" height="120"></canvas></div>
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="dailyTrendChart" height="120"></canvas></div>
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="routeChart" height="120"></canvas></div>
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="hourPatternChart" height="120"></canvas></div>
+          </div>
+        </section>
+
+        <section data-panel="monthly" class="space-y-4 hidden">
+          <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="monthlyChart" height="120"></canvas></div>
+          <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="monthlyQuarterChart" height="120"></canvas></div>
+          <div class="panel rounded-2xl p-4 border border-slate-200">
+            <h3 class="text-lg font-semibold mb-3">Monthly Utilization by Quarter</h3>
+            <div id="monthlyQuarterTable" class="overflow-auto text-sm"></div>
+          </div>
+        </section>
+
+        <section data-panel="service" class="space-y-4 hidden">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="serviceKpis"></div>
+          <div class="panel rounded-2xl p-4 border border-slate-200">
+            <h3 class="text-lg font-semibold mb-3">Service Window Heat Map (Aircraft x Hour of Day)</h3>
+            <div class="mb-3 flex gap-2">
+              <button class="pill px-3 py-1 rounded-full text-sm active" data-heat-mode="BOTH">Both</button>
+              <button class="pill px-3 py-1 rounded-full text-sm" data-heat-mode="DEP">Dep</button>
+              <button class="pill px-3 py-1 rounded-full text-sm" data-heat-mode="ARR">Arr</button>
+            </div>
+            <div id="heatmap" class="overflow-auto"></div>
+          </div>
+          <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="serviceMonthlyChart" height="120"></canvas></div>
+            <div class="panel rounded-2xl p-4 border border-slate-200"><canvas id="serviceAircraftAvgChart" height="120"></canvas></div>
+          </div>
+          <div class="panel rounded-2xl p-4 border border-slate-200">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-lg font-semibold">Service Window Data</h3>
+              <button id="clearHeatCellFilter" class="px-3 py-1 rounded-lg border border-slate-300 text-sm">Clear Cell Filter</button>
+            </div>
+            <div id="serviceHeatFilterLabel" class="text-sm text-slate-600 mb-2"></div>
+            <div id="serviceHeatTable" class="overflow-auto text-sm"></div>
+          </div>
+        </section>
+
+        <section data-panel="crewdaily" class="hidden">
+          <div class="panel rounded-2xl p-4 border border-slate-200 text-slate-600">Crew Daily utilization view ready. If you want, I can map PIC/SIC/CA from source fields in next step.</div>
+        </section>
+
+        <section data-panel="crewpool" class="space-y-4 hidden">
+          <div class="panel rounded-2xl p-4 border border-slate-200">
+            <h3 class="text-lg font-semibold mb-3">Crew Pool Inputs</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label class="text-sm">
+                <span class="block text-slate-600 mb-1">Release to Gan Ops</span>
+                <input id="releaseGanOpsInput" type="number" step="0.1" class="w-full border rounded-md px-3 py-2" />
+              </label>
+              <label class="text-sm">
+                <span class="block text-slate-600 mb-1">Number of Captain Available for Rostering</span>
+                <input id="captainAvailableInput" type="number" step="1" class="w-full border rounded-md px-3 py-2" />
+              </label>
+            </div>
+          </div>
+          <div id="crewPoolKpis" class="grid grid-cols-2 md:grid-cols-4 gap-3"></div>
+          <div class="panel rounded-2xl p-4 border border-slate-200">
+            <h3 class="text-lg font-semibold mb-3">Crew Requirement Mapping</h3>
+            <div id="crewReqTable" class="text-sm text-slate-700 overflow-auto"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+<script>
+const DATE = luxon.DateTime;
+const charts = {};
+const state = {
+  rows: [], activeTab: 'flights', heatMode: 'BOTH', search: '', dateFrom: null, dateTo: null,
+  quarter: 'ALL',
+  selected: { reg:new Set(), org:new Set(), dst:new Set(), type:new Set(), status:new Set() },
+  cross: { ac:null, route:null, type:null },
+  crewReqModel: null,
+  heatCellFilter: { ac:null, hour:null },
+  manualInputs: { releaseGanOps:null, captainAvailable:null }
+};
+
+const DEFAULT_CREW_REQ_MODEL = {
+  maxHoursOperationalDay: 0.5208333333333334,
+  maxFdpDay: 0.3958333333333333,
+  maxFtlDay: 0.1875,
+  standbySet: 1.0,
+  adminSet: 1.5,
+  releaseGanOps: 0,
+  trainingSet: 1.0,
+  crewOffPerDay: 4,
+  leavePerDay: 5,
+  captainsAvailable: 0,
+  firstOfficersAvailable: 0,
+  sourceSheet: 'Crew Requirement (Default)'
+};
+
+const fmt = { hours:n=>`${Number(n).toFixed(1)}h`, int:n=>Number(n).toLocaleString(), mins:n=>`${Math.round(Number(n))}m` };
+const uniq = vals => Array.from(new Set(vals)).sort();
+const parseDate = s => { const d=DATE.fromFormat(s,'dd.MM.yyyy'); return d.isValid?d:null; };
+const excelDayFractionToMinutes = v => { const n=Number(v); return Number.isNaN(n)?null:Math.round((n%1)*24*60); };
+const formatExcelTimeHHMM = v => {
+  const mins = excelDayFractionToMinutes(v);
+  if (mins === null) return String(v || '');
+  const h = String(Math.floor(mins / 60) % 24).padStart(2, '0');
+  const m = String(mins % 60).padStart(2, '0');
+  return `${h}:${m}`;
+};
+const EXCEL_EPOCH = DATE.fromISO('1899-12-30');
+
+function enrich(rows){
+  return rows.map(r=>{
+    const d=parseDate(r['Travel Date']);
+    const q = d ? `Q${Math.floor((d.month - 1) / 3) + 1}` : '';
+    const yq = d ? `${d.year}-${q}` : '';
+    return { ...r, route:`${r.ORG}-${r.DST}`, dayKey:d?d.toISODate():'', month:d?d.toFormat('LLL-yy'):'', monthKey:d?d.toFormat('yyyy-LL'):'', quarter:q, yearQuarter:yq, travelISO:d?d.toISODate():'', paxTotal:(r.Pax||0)+(r.Inf||0) };
+  });
+}
+
+function normalizeAndLoadRows(rows){
+  state.rows = enrich(rows.map(r => ({
+    'Travel Date': r['Travel Date'] || r.travelDate || '',
+    Flight: r.Flight || r.flight || '',
+    Leg: r.Leg || r.leg || '',
+    'Transfer Type': r['Transfer Type'] || r.transferType || '',
+    AC: r.AC || r.ac || '',
+    ORG: r.ORG || r.org || '',
+    DST: r.DST || r.dst || '',
+    STD: r.STD ?? r.std ?? '',
+    STA: r.STA ?? r.sta ?? '',
+    Pax: Number(r.Pax ?? r.pax ?? 0) || 0,
+    Inf: Number(r.Inf ?? r.inf ?? 0) || 0,
+    Status: r.Status || r.status || '',
+    BlockHours: Number(r.BlockHours ?? r.blockHours ?? 0) || 0,
+    FlightHours: Number(r.FlightHours ?? r.flightHours ?? 0) || 0,
+    DelayMinutes: Number(r.DelayMinutes ?? r.delayMinutes ?? 0) || 0
+  })));
+}
+
+function excelSerialToDisplayDate(serial){
+  if (serial === null || serial === undefined || serial === '') return '';
+  const n = Number(serial);
+  if (Number.isNaN(n)) return String(serial);
+  return EXCEL_EPOCH.plus({ days: Math.floor(n) }).toFormat('dd.MM.yyyy');
+}
+
+function loadRowsFromWorkbook(buffer){
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const wsName = wb.SheetNames[0];
+  const ws = wb.Sheets[wsName];
+  const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (!matrix.length) return [];
+
+  const canonical = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const required = ['travel date', 'ac', 'org', 'dst', 'std', 'sta'];
+  let headerRowIndex = -1;
+
+  for (let i = 0; i < Math.min(matrix.length, 20); i++) {
+    const row = matrix[i].map(canonical);
+    const hits = required.filter(h => row.includes(h)).length;
+    if (hits >= 4) { headerRowIndex = i; break; }
+  }
+  if (headerRowIndex === -1) return [];
+
+  const headers = matrix[headerRowIndex].map(h => String(h || '').trim());
+  const dataRows = matrix.slice(headerRowIndex + 1).filter(r => r.some(v => String(v || '').trim() !== ''));
+  const idx = Object.fromEntries(headers.map((h, i) => [canonical(h), i]));
+  const cell = (row, key) => {
+    const i = idx[canonical(key)];
+    return i === undefined ? '' : row[i];
+  };
+
+  return dataRows.map(row => {
+    const travelRaw = cell(row, 'Travel Date');
+    return {
+      'Travel Date': typeof travelRaw === 'number' ? excelSerialToDisplayDate(travelRaw) : String(travelRaw || ''),
+      Flight: String(cell(row, 'Flight') || ''),
+      Leg: String(cell(row, 'Leg') || ''),
+      'Transfer Type': String(cell(row, 'Transfer Type') || ''),
+      AC: String(cell(row, 'AC') || ''),
+      ORG: String(cell(row, 'ORG') || ''),
+      DST: String(cell(row, 'DST') || ''),
+      STD: cell(row, 'STD'),
+      STA: cell(row, 'STA'),
+      Pax: Number(cell(row, 'Pax') || 0) || 0,
+      Inf: Number(cell(row, 'Inf') || 0) || 0,
+      Status: String(cell(row, 'Status') || ''),
+      BlockHours: Number(cell(row, 'Block Time') || 0) * 24 || Number(cell(row, 'BlockHours') || 0) || 0,
+      FlightHours: Number(cell(row, 'Flight Time') || 0) * 24 || Number(cell(row, 'FlightHours') || 0) || 0,
+      DelayMinutes: (Number(cell(row, 'Delay Time') || 0) * 24 * 60) || Number(cell(row, 'DelayMinutes') || 0) || 0
+    };
+  });
+}
+
+function loadCrewReqModelFromWorkbook(buffer){
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets['Crew Requirement'] || wb.Sheets[wb.SheetNames[0]];
+  const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  if (!matrix.length) return null;
+
+  const norm = s => String(s || '').trim().toLowerCase();
+  let maxPlanCol = -1;
+  for (const row of matrix.slice(0, 20)) {
+    for (let i = 0; i < row.length; i++) {
+      if (norm(row[i]).includes('maximum operational plan')) maxPlanCol = i;
+    }
+    if (maxPlanCol !== -1) break;
+  }
+  if (maxPlanCol === -1) maxPlanCol = 14;
+
+  const pick = (needle) => {
+    for (const row of matrix) {
+      const txt = row.map(norm).join(' | ');
+      if (txt.includes(needle)) {
+        const v = Number(row[maxPlanCol]);
+        if (!Number.isNaN(v)) return v;
+      }
+    }
+    return null;
+  };
+
+  return {
+    maxHoursOperationalDay: pick('maximum hours  available for operational / day'),
+    maxFdpDay: pick('maximum hours  fdp allowed / day'),
+    maxFtlDay: pick('maximum ftl allowed / day'),
+    standbySet: pick('number of standby set required / day'),
+    adminSet: pick('assigned admin duty'),
+    releaseGanOps: pick('release to gan ops'),
+    trainingSet: pick('ground training / flight training'),
+    crewOffPerDay: pick('avg number of crew off per day'),
+    leavePerDay: pick('avg number of crew on leave / day'),
+    captainsAvailable: pick('number of captain available for rostering'),
+    firstOfficersAvailable: pick('total number of f/o available'),
+    sourceSheet: ws && ws['!ref'] ? 'Crew Requirement' : wb.SheetNames[0]
+  };
+}
+
+function renderPills(id, values, setRef){
+  const el=document.getElementById(id);
+  el.innerHTML = values.map(v=>`<button class="pill px-3 py-1 rounded-full text-sm ${setRef.has(v)?'active':''}" data-v="${v}">${v}</button>`).join('');
+  el.querySelectorAll('button').forEach(b=>b.onclick=()=>{ const v=b.dataset.v; setRef.has(v)?setRef.delete(v):setRef.add(v); render(); });
+}
+
+function inSetOrAll(set, v){ return set.size===0 || set.has(v); }
+
+function passesFilter(r, ignoreQuarter=false){
+  if(state.search){
+    const blob=[r.AC,r.ORG,r.DST,r.route,r.Flight,r['Transfer Type'],r.Status,r['Travel Date']].join(' ').toLowerCase();
+    if(!blob.includes(state.search.toLowerCase())) return false;
+  }
+  if(state.dateFrom && r.travelISO < state.dateFrom) return false;
+  if(state.dateTo && r.travelISO > state.dateTo) return false;
+  if(!ignoreQuarter && state.quarter !== 'ALL' && r.yearQuarter !== state.quarter) return false;
+  if(!inSetOrAll(state.selected.reg, r.AC)) return false;
+  if(!inSetOrAll(state.selected.org, r.ORG)) return false;
+  if(!inSetOrAll(state.selected.dst, r.DST)) return false;
+  if(!inSetOrAll(state.selected.type, r['Transfer Type'])) return false;
+  if(!inSetOrAll(state.selected.status, r.Status)) return false;
+  if(state.cross.ac && r.AC!==state.cross.ac) return false;
+  if(state.cross.route && r.route!==state.cross.route) return false;
+  if(state.cross.type && r['Transfer Type']!==state.cross.type) return false;
+  return true;
+}
+
+function filtered(ignoreQuarter=false){ return state.rows.filter(r => passesFilter(r, ignoreQuarter)); }
+
+function aggregate(list,key,metric,top=10){
+  const m=new Map();
+  list.forEach(r=>m.set(r[key], (m.get(r[key])||0) + r[metric]));
+  return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]).slice(0,top);
+}
+
+function drawChart(id,cfg){ if(charts[id]) charts[id].destroy(); charts[id] = new Chart(document.getElementById(id), cfg); }
+
+function updateKPIs(list){
+  const flights=list.filter(r=>r.ORG==='MLE' || r.DST==='MLE').length;
+  const mFlights=list.filter(r=>r.ORG==='MLE' || r.DST==='MLE');
+  const block=list.reduce((a,b)=>a+b.BlockHours,0), flight=list.reduce((a,b)=>a+b.FlightHours,0), pax=mFlights.reduce((a,b)=>a+b.paxTotal,0), delay=list.reduce((a,b)=>a+b.DelayMinutes,0);
+  document.getElementById('kpis').innerHTML = [
+    ['Flights',fmt.int(flights),'ORG=MLE or DST=MLE'],['Block Hours',fmt.hours(block),'Aircraft utilization'],['Flight Hours',fmt.hours(flight),'Airborne time'],['Passengers',fmt.int(pax),`MLE DEP/ARR only · delay ${fmt.mins(delay)}`]
+  ].map(([t,v,s])=>`<article class="panel rounded-xl border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500">${t}</p><p class="text-2xl font-semibold mt-1">${v}</p><p class="text-xs text-slate-500 mt-1">${s}</p></article>`).join('');
+}
+
+function updateCharts(list){
+  const acData=aggregate(list,'AC','BlockHours',12);
+  drawChart('aircraftHoursChart',{type:'bar',data:{labels:acData.map(x=>x[0]),datasets:[{label:'Block Hours',data:acData.map(x=>x[1]),backgroundColor:'#0f766e'}]},options:{plugins:{title:{display:true,text:'Top Aircraft by Block Hours'},legend:{display:false}},onClick:(_,els)=>{if(!els.length)return;state.cross.ac=acData[els[0].index][0];render();}}});
+
+  const byDay=aggregate(list,'dayKey','BlockHours',1000).sort((a,b)=>a[0].localeCompare(b[0]));
+  drawChart('dailyTrendChart',{type:'line',data:{labels:byDay.map(x=>x[0]),datasets:[{label:'Daily Block Hours',data:byDay.map(x=>x[1]),borderColor:'#155e75',backgroundColor:'rgba(21,94,117,.2)',tension:.25,fill:true}]},options:{plugins:{title:{display:true,text:'Daily Utilization Trend'}}}});
+
+  const monthAgg=new Map();
+  list.forEach(r=>{
+    if(!r.monthKey) return;
+    if(!monthAgg.has(r.monthKey)) monthAgg.set(r.monthKey,{label:r.month,total:0});
+    monthAgg.get(r.monthKey).total += r.BlockHours;
+  });
+  const byMonth=Array.from(monthAgg.entries()).sort((a,b)=>a[0].localeCompare(b[0])).map(([,v])=>v);
+  drawChart('monthlyChart',{type:'bar',data:{labels:byMonth.map(x=>x.label),datasets:[{label:'Monthly Block Hours',data:byMonth.map(x=>x.total),backgroundColor:'#2563eb'}]},options:{plugins:{title:{display:true,text:'Monthly Utilization'}}}});
+
+  const routeData=aggregate(list,'route','BlockHours',20);
+  drawChart('routeChart',{type:'bar',data:{labels:routeData.map(x=>x[0]),datasets:[{label:'Block Hours',data:routeData.map(x=>x[1]),backgroundColor:'#0ea5e9'}]},options:{indexAxis:'y',plugins:{title:{display:true,text:'Destinations & Routes'},legend:{display:false}},onClick:(_,els)=>{if(!els.length)return;state.cross.route=routeData[els[0].index][0];render();}}});
+
+  const hourBins=Array.from({length:24},(_,h)=>({h,count:0}));
+  list.forEach(r=>{ const m=excelDayFractionToMinutes(r.STD); if(m!==null){ const h=Math.floor(m/60)%24; hourBins[h].count+=1; } });
+  drawChart('hourPatternChart',{type:'line',data:{labels:hourBins.map(x=>String(x.h).padStart(2,'0')+':00'),datasets:[{label:'Departures by Hour',data:hourBins.map(x=>x.count),borderColor:'#7c3aed',backgroundColor:'rgba(124,58,237,.2)',fill:true,tension:.25}]},options:{plugins:{title:{display:true,text:'Day Pattern'}}}});
+}
+
+function updateMonthlyQuarterTable(list){
+  const monthMap = new Map(); // yyyy-LL => {label, total, quarter, yearQuarter}
+  list.forEach(r=>{
+    if(!r.monthKey) return;
+    const yq = r.monthKey ? `${r.monthKey.slice(0,4)}-${r.quarter || ''}` : (r.quarter || '');
+    if(!monthMap.has(r.monthKey)) monthMap.set(r.monthKey,{label:r.month,total:0,quarter:r.quarter || '',yearQuarter:yq});
+    monthMap.get(r.monthKey).total += Number(r.BlockHours || 0);
+  });
+  const monthRows = Array.from(monthMap.entries()).sort((a,b)=>a[0].localeCompare(b[0])).map(([k,v])=>({key:k,...v}));
+  const qMap = new Map();
+  monthRows.forEach(m=>{
+    if(!qMap.has(m.yearQuarter)) qMap.set(m.yearQuarter, []);
+    qMap.get(m.yearQuarter).push(m);
+  });
+
+  const qOrder = ['Q1','Q2','Q3','Q4'];
+  const quarters = Array.from(qMap.keys()).sort((a,b)=>{
+    const ay = Number(a.slice(0,4)), by = Number(b.slice(0,4));
+    if (ay !== by) return ay - by;
+    return qOrder.indexOf(a.slice(5)) - qOrder.indexOf(b.slice(5));
+  });
+  const qAircraftDay = new Map(); // year-quarter => Map(day => Set(ac))
+  list.forEach(r=>{
+    if(!r.quarter || !r.dayKey || !r.AC) return;
+    const yq = r.monthKey ? `${r.monthKey.slice(0,4)}-${r.quarter}` : r.quarter;
+    if(!qAircraftDay.has(yq)) qAircraftDay.set(yq, new Map());
+    const dMap = qAircraftDay.get(yq);
+    if(!dMap.has(r.dayKey)) dMap.set(r.dayKey, new Set());
+    dMap.get(r.dayKey).add(r.AC);
+  });
+  const qAvgAcDay = new Map();
+  quarters.forEach(q=>{
+    const dMap = qAircraftDay.get(q) || new Map();
+    const days = Array.from(dMap.values());
+    const avg = days.length ? days.reduce((a,s)=>a+s.size,0)/days.length : 0;
+    qAvgAcDay.set(q, avg);
+  });
+
+  const html = `<table class="min-w-full border border-slate-200">
+    <thead>
+      <tr>
+        <th class="border p-2 bg-slate-100 text-left">Quarter</th>
+        <th class="border p-2 bg-slate-100 text-right">Avg AC Utilized/Day</th>
+        <th class="border p-2 bg-slate-100 text-left">Month</th>
+        <th class="border p-2 bg-slate-100 text-right">Block Hours</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${quarters.map(q=>{
+        const rows = qMap.get(q) || [];
+        const total = rows.reduce((a,b)=>a+b.total,0);
+        return rows.map((r,idx)=>`
+          <tr>
+            ${idx===0?`<td class="border p-2 font-semibold bg-slate-50" rowspan="${rows.length+1}">${q}</td>`:''}
+            ${idx===0?`<td class="border p-2 text-right font-semibold bg-slate-50" rowspan="${rows.length+1}">${(qAvgAcDay.get(q)||0).toFixed(2)}</td>`:''}
+            <td class="border p-2">${r.label}</td>
+            <td class="border p-2 text-right">${r.total.toFixed(1)}</td>
+          </tr>
+          ${idx===rows.length-1?`<tr><td class="border p-2 font-semibold bg-slate-50">Quarter Total</td><td class="border p-2 text-right font-semibold bg-slate-50">${total.toFixed(1)}</td></tr>`:''}
+        `).join('');
+      }).join('')}
+    </tbody>
+  </table>`;
+  document.getElementById('monthlyQuarterTable').innerHTML = html;
+
+  // Quarterly graph (year-separated quarter labels)
+  const quarterTotals = quarters.map(q => {
+    const rows = qMap.get(q) || [];
+    const total = rows.reduce((a,b)=>a+b.total,0);
+    const avgAcDay = qAvgAcDay.get(q) || 0;
+    return { q, total, avgAcDay };
+  });
+
+  drawChart('monthlyQuarterChart', {
+    type:'bar',
+    data:{
+      labels: quarterTotals.map(x=>x.q),
+      datasets:[
+        { label:'Quarter Total Block Hours', data: quarterTotals.map(x=>x.total), backgroundColor:'#1d4ed8', yAxisID:'y' },
+        { label:'Avg AC Utilized/Day', data: quarterTotals.map(x=>x.avgAcDay), type:'line', borderColor:'#dc2626', backgroundColor:'rgba(220,38,38,.2)', yAxisID:'y1', tension:.25 }
+      ]
+    },
+    options:{
+      plugins:{ title:{ display:true, text:'Monthly Utilization by Quarter' } },
+      scales:{ y:{ position:'left' }, y1:{ position:'right', grid:{ drawOnChartArea:false } } }
+    }
+  });
+}
+
+function buildServiceWindows(list){
+  const byAircraftDay=new Map();
+  list.forEach(r=>{
+    if(!r.AC || !r.travelISO) return;
+    const std=excelDayFractionToMinutes(r.STD);
+    const ata=excelDayFractionToMinutes(r.STA); // ATA proxy from current source
+    if(std===null || ata===null) return;
+    const key=`${r.AC}|${r.travelISO}`;
+    if(!byAircraftDay.has(key)) byAircraftDay.set(key,{ac:r.AC,date:r.travelISO,month:r.month,monthKey:r.monthKey,firstSTD:std,lastATA:ata});
+    const o=byAircraftDay.get(key);
+    if(std < o.firstSTD) o.firstSTD=std;
+    if(ata > o.lastATA) o.lastATA=ata;
+  });
+
+  return Array.from(byAircraftDay.values()).map(o=>{
+    let diff=o.lastATA-o.firstSTD;
+    if(diff<0) diff+=24*60;
+    return { ...o, serviceHours: diff/60 };
+  });
+}
+
+function updateServiceWindowAnalytics(list){
+  const windows=buildServiceWindows(list);
+  const total=windows.reduce((a,b)=>a+b.serviceHours,0);
+  const avg=windows.length? total/windows.length : 0;
+  const uniqueAc=new Set(windows.map(w=>w.ac)).size;
+  const avgPerAircraft=uniqueAc? total/uniqueAc : 0;
+  const aircraftByDay = new Map();
+  windows.forEach(w => {
+    if (!aircraftByDay.has(w.date)) aircraftByDay.set(w.date, new Set());
+    aircraftByDay.get(w.date).add(w.ac);
+  });
+  const avgAircraftPerDay = aircraftByDay.size
+    ? Array.from(aircraftByDay.values()).reduce((a, s) => a + s.size, 0) / aircraftByDay.size
+    : 0;
+
+  document.getElementById('serviceKpis').innerHTML = [
+    ['Service Total', `${total.toFixed(1)}h`, 'Sum of aircraft-day service hours'],
+    ['Service Avg', `${avg.toFixed(2)}h`, 'Avg per aircraft-day'],
+    ['Avg Aircraft Per Day', `${avgAircraftPerDay.toFixed(2)}`, 'Average active aircraft each day'],
+    ['Avg / Aircraft', `${avgPerAircraft.toFixed(1)}h`, 'Total hours ÷ active aircraft']
+  ].map(([t,v,s])=>`<article class="panel rounded-xl border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500">${t}</p><p class="text-2xl font-semibold mt-1">${v}</p><p class="text-xs text-slate-500 mt-1">${s}</p></article>`).join('');
+
+  const m=new Map();
+  windows.forEach(w=>{
+    if(!m.has(w.monthKey)) m.set(w.monthKey,{label:w.month,total:0,count:0});
+    const o=m.get(w.monthKey); o.total+=w.serviceHours; o.count+=1;
+  });
+  const monthly=Array.from(m.entries()).sort((a,b)=>a[0].localeCompare(b[0])).map(([,v])=>({label:v.label,total:v.total,avg:v.count?v.total/v.count:0}));
+  drawChart('serviceMonthlyChart',{
+    type:'bar',
+    data:{
+      labels:monthly.map(x=>x.label),
+      datasets:[
+        {label:'Monthly Total Service Hrs',data:monthly.map(x=>x.total),backgroundColor:'#2563eb',yAxisID:'y'},
+        {label:'Monthly Avg Service Hrs',data:monthly.map(x=>x.avg),type:'line',borderColor:'#dc2626',backgroundColor:'rgba(220,38,38,.2)',yAxisID:'y1',tension:.25}
+      ]
+    },
+    options:{plugins:{title:{display:true,text:'Service Window by Month (Total & Avg)'}},scales:{y:{position:'left'},y1:{position:'right',grid:{drawOnChartArea:false}}}}
+  });
+
+  const acMap=new Map();
+  windows.forEach(w=>{ if(!acMap.has(w.ac)) acMap.set(w.ac,{total:0,count:0}); const o=acMap.get(w.ac); o.total+=w.serviceHours; o.count+=1; });
+  const acAvg=Array.from(acMap.entries()).map(([ac,v])=>[ac,v.count?v.total/v.count:0]).sort((a,b)=>b[1]-a[1]);
+  drawChart('serviceAircraftAvgChart',{
+    type:'bar',
+    data:{labels:acAvg.map(x=>x[0]),datasets:[{label:'Avg Service Hours per Day',data:acAvg.map(x=>x[1]),backgroundColor:'#0f766e'}]},
+    options:{plugins:{title:{display:true,text:'Average Service Hours by Aircraft'}},scales:{x:{ticks:{autoSkip:false}}}}
+  });
+}
+
+function calculateCrewMetrics(list, m){
+  const byDay = new Map();
+  list.forEach(r => {
+    if (!r.dayKey) return;
+    if (!byDay.has(r.dayKey)) byDay.set(r.dayKey, { ac: new Set(), block: 0 });
+    const d = byDay.get(r.dayKey);
+    d.ac.add(r.AC);
+    d.block += Number(r.BlockHours || 0);
+  });
+
+  const days = Array.from(byDay.values());
+  const avgAircraftPerDay = days.length ? days.reduce((a, d) => a + d.ac.size, 0) / days.length : 0;
+  const avgBlockPerDay = days.length ? days.reduce((a, d) => a + d.block, 0) / days.length : 0;
+  const windows = buildServiceWindows(list);
+  const avgServiceHoursPerAircraftDay = windows.length ? windows.reduce((a,b)=>a+b.serviceHours,0)/windows.length : 0;
+
+  const maxOp = Number(m.maxHoursOperationalDay || 0) * 24;
+  const maxFdp = Number(m.maxFdpDay || 0) * 24;
+  const maxFtl = Number(m.maxFtlDay || 0) * 24;
+  const standby = Number(m.standbySet || 0);
+  const admin = Number(m.adminSet || 0);
+  const training = Number(m.trainingSet || 0);
+  const crewOff = Number(m.crewOffPerDay ?? DEFAULT_CREW_REQ_MODEL.crewOffPerDay);
+  const leave = Number(m.leavePerDay ?? DEFAULT_CREW_REQ_MODEL.leavePerDay);
+  const capAvail = Number((state.manualInputs.captainAvailable ?? m.captainsAvailable) || 0);
+  const foAvail = Number(m.firstOfficersAvailable || 0);
+  const releaseGanOps = Number((state.manualInputs.releaseGanOps ?? m.releaseGanOps) || 0);
+
+  const reqByFdp = (maxOp > 0 && maxFdp > 0) ? (avgAircraftPerDay * maxOp) / maxFdp : 0;
+  const reqByFtl = (maxFtl > 0) ? (avgBlockPerDay / maxFtl) : 0;
+  const reqCore = (reqByFdp + reqByFtl) / 2;
+  const totalPerDay = reqCore + standby + admin + releaseGanOps + training;
+  const totalReq = totalPerDay + crewOff + leave;
+  const capExcess = capAvail - totalReq;
+  const foExcess = foAvail - totalReq;
+
+  return {
+    avgAircraftPerDay, avgBlockPerDay, avgServiceHoursPerAircraftDay,
+    maxOp, maxFdp, maxFtl, reqByFdp, reqByFtl, reqCore,
+    standby, admin, releaseGanOps, training, totalPerDay, crewOff, leave, totalReq,
+    capAvail, foAvail, capExcess, foExcess
+  };
+}
+
+function updateCrewPool(list, listAllQuarter){
+  const m = state.crewReqModel || {};
+  const cur = calculateCrewMetrics(list, m);
+
+  document.getElementById('crewPoolKpis').innerHTML = [
+    ['Avg AC/Day', cur.avgAircraftPerDay.toFixed(2), 'From system filtered data'],
+    ['Avg Block/Day', `${cur.avgBlockPerDay.toFixed(2)}h`, 'From system filtered data'],
+    ['Core Crew Req', cur.reqCore.toFixed(2), 'Based on FDP + FTL mapping'],
+    ['Total Crew Req', cur.totalReq.toFixed(2), 'Including off + leave']
+  ].map(([t,v,s])=>`<article class="panel rounded-xl border border-slate-200 p-4"><p class="text-xs uppercase tracking-wider text-slate-500">${t}</p><p class="text-2xl font-semibold mt-1">${v}</p><p class="text-xs text-slate-500 mt-1">${s}</p></article>`).join('');
+
+  const qOrder = {Q1:1,Q2:2,Q3:3,Q4:4};
+  const qtrs = Array.from(new Set(listAllQuarter.map(r=>r.yearQuarter).filter(Boolean))).sort((a,b)=>{
+    const ay=Number(a.slice(0,4)), by=Number(b.slice(0,4));
+    if(ay!==by) return ay-by;
+    return (qOrder[a.slice(5)]||9) - (qOrder[b.slice(5)]||9);
+  });
+  const qtrMetrics = Object.fromEntries(qtrs.map(q=>{
+    const qList = listAllQuarter.filter(r=>r.yearQuarter===q);
+    return [q, calculateCrewMetrics(qList, m)];
+  }));
+
+  const rows = [
+    ['1', 'No of Aircraft Operational / Day (Avg)', x=>x.avgAircraftPerDay.toFixed(2)],
+    ['2', 'Maximum Hours Available for Operational / Day', x=>`${x.maxOp.toFixed(2)}h`],
+    ['3', 'Maximum FDP allowed / Day', x=>`${x.maxFdp.toFixed(2)}h`],
+    ['4', 'Maximum FTL allowed / Day / Crew', x=>`${x.maxFtl.toFixed(2)}h`],
+    ['5', 'Daily Avg Schedule Block Hours / Day (Date range)', x=>`${x.avgBlockPerDay.toFixed(2)}h`],
+    ['6', 'Crew set Required / Day (Aircraft Availability + FDP) = (Avg AC/Day × 13:30) ÷ 10:00', x=>x.reqByFdp.toFixed(2)],
+    ['7', 'Crew set Required / Day (FTL) = Avg Block/Day ÷ 4:30', x=>x.reqByFtl.toFixed(2)],
+    ['8', 'Avg Crew Set Required / Day (FTL & FDP)', x=>x.reqCore.toFixed(2)],
+    ['9', 'Standby Set Required / Day', x=>x.standby.toFixed(2)],
+    ['10', 'Admin Duty / Chief Pilot / Training Captain', x=>x.admin.toFixed(2)],
+    ['10A', 'Release to Gan Ops', x=>x.releaseGanOps.toFixed(2)],
+    ['11', 'Ground Training / Flight Training', x=>x.training.toFixed(2)],
+    ['12', 'Total Crew Set Required per Day', x=>x.totalPerDay.toFixed(2)],
+    ['13', 'Avg Number of Crew Off per Day', x=>x.crewOff.toFixed(2)],
+    ['14', 'Avg Number of Crew on Leave / Day', x=>x.leave.toFixed(2)],
+    ['15', 'Total Number of Crew Requirement', x=>x.totalReq.toFixed(2)],
+    ['', 'Number of Captain Available for Rostering', x=>x.capAvail ? String(Math.round(x.capAvail)) : '-'],
+    ['', 'Captain Excess', x=>x.capAvail ? x.capExcess.toFixed(2) : '-'],
+    ['16', 'Total Number of F/O Available', x=>x.foAvail ? x.foAvail.toFixed(2) : '-'],
+    ['', 'F/O Excess', x=>x.foAvail ? x.foExcess.toFixed(2) : '-']
+  ];
+  const headQ = qtrs.map(q=>`<th class="border p-2 bg-slate-100 text-right">${q}</th>`).join('');
+  const body = rows.map(r=>{
+    const qCells = qtrs.map(q=>`<td class="border p-2 text-right">${r[2](qtrMetrics[q])}</td>`).join('');
+    return `<tr><td class="border p-2 font-medium bg-slate-50">${r[0]}</td><td class="border p-2">${r[1]}</td><td class="border p-2 text-right">${r[2](cur)}</td>${qCells}</tr>`;
+  }).join('');
+  const src = state.crewReqModel ? (state.crewReqModel.sourceSheet || 'Uploaded') : 'Not uploaded';
+  document.getElementById('crewReqTable').innerHTML = `<table class="min-w-full border border-slate-200"><thead><tr><th class="border p-2 bg-slate-100 text-left">#</th><th class="border p-2 bg-slate-100 text-left">Requirement Item</th><th class="border p-2 bg-slate-100 text-right">Value (Current Filter)</th>${headQ}</tr></thead><tbody>${body}<tr><td class="border p-2 bg-slate-50"></td><td class="border p-2 bg-slate-50 font-medium">Source Model</td><td class="border p-2 text-right bg-slate-50">${src}</td>${qtrs.map(()=>`<td class="border p-2 bg-slate-50"></td>`).join('')}</tr></tbody></table>`;
+}
+
+function updateHeatmap(list){
+  const hours=Array.from({length:15},(_,i)=>i+5);
+  const acCounts=new Map(), totals=new Map();
+  const hourFromMinutes=mins=>(mins===null||mins===undefined)?null:Math.floor(mins/60)%24;
+
+  list.forEach(r=>{ const ac=r.AC||'Unknown'; if(!acCounts.has(ac)) acCounts.set(ac,Array(24).fill(0)); const row=acCounts.get(ac); const hDep=hourFromMinutes(excelDayFractionToMinutes(r.STD)); const hArr=hourFromMinutes(excelDayFractionToMinutes(r.STA)); if((state.heatMode==='DEP'||state.heatMode==='BOTH')&&hDep!==null) row[hDep]+=1; if((state.heatMode==='ARR'||state.heatMode==='BOTH')&&hArr!==null) row[hArr]+=1; });
+
+  const acList=Array.from(acCounts.keys());
+  acList.forEach(ac=>totals.set(ac,acCounts.get(ac).reduce((a,b)=>a+b,0)));
+  const sortedAc=acList.sort((a,b)=>totals.get(b)-totals.get(a));
+  const values=sortedAc.flatMap(ac=>acCounts.get(ac)).filter(v=>v>0), sv=[...values].sort((a,b)=>a-b);
+  const max=Math.max(1,...values), q1=sv.length?sv[Math.floor(sv.length*0.25)]:1, q2=sv.length?sv[Math.floor(sv.length*0.5)]:2, q3=sv.length?sv[Math.floor(sv.length*0.75)]:3;
+  const color=v=>!v?'hm-empty':v<=q1?'bg-lime-200 text-slate-700':v<=q2?'bg-amber-300 text-slate-800':v<=q3?'bg-orange-500 text-white':'bg-red-700 text-white';
+
+  let html=`<div class="min-w-[980px]"><div class="grid" style="grid-template-columns:90px repeat(${hours.length}, minmax(52px,1fr)) 64px;">`;
+  html+=`<div class="hm-head border p-1 text-center text-[11px] font-semibold">Reg \\ Hour</div>`;
+  hours.forEach(h=>html+=`<div class="hm-head border p-1 text-center text-[11px] font-semibold">${String(h).padStart(2,'0')}:00</div>`);
+  html+=`<div class="hm-head border p-1 text-center text-[11px] font-semibold">Total</div>`;
+  sortedAc.forEach(ac=>{ html+=`<div class="border p-1 text-center text-xs font-semibold bg-slate-200 text-slate-700">${ac}</div>`; const row=acCounts.get(ac); hours.forEach(h=>{ const v=row[h]; const isSel=state.heatCellFilter.ac===ac && state.heatCellFilter.hour===h; html+=`<button data-heat-ac="${ac}" data-heat-hour="${h}" class="border px-1 py-[2px] text-center text-xs font-semibold ${color(v)} ${isSel?'ring-2 ring-indigo-500':''}" title="Filter table by ${ac} ${String(h).padStart(2,'0')}:00">${v||''}</button>`; }); html+=`<div class="hm-total border p-1 text-center text-xs">${totals.get(ac)}</div>`; });
+  html+=`</div></div>`;
+  const label=state.heatMode==='DEP'?'Departures':state.heatMode==='ARR'?'Arrivals':'Movements';
+  html+=`<div class="mt-4 flex items-center gap-2 text-sm text-slate-600 flex-wrap"><span class="font-semibold">${label}:</span><span class="w-8 h-6 inline-block rounded border hm-empty"></span><span>0</span><span class="w-8 h-6 inline-block rounded border bg-lime-200"></span><span>${q1}</span><span class="w-8 h-6 inline-block rounded border bg-amber-300"></span><span>${q2}</span><span class="w-8 h-6 inline-block rounded border bg-orange-500"></span><span>${q3}</span><span class="w-8 h-6 inline-block rounded border bg-red-700"></span><span>${max}</span></div>`;
+  document.getElementById('heatmap').innerHTML=html;
+}
+
+function updateServiceHeatTable(list){
+  const hourFromMinutes=mins=>(mins===null||mins===undefined)?null:Math.floor(mins/60)%24;
+  const acSel = state.heatCellFilter.ac;
+  const hSel = state.heatCellFilter.hour;
+  const rows = list.filter(r=>{
+    if(!acSel && hSel===null) return true;
+    if(acSel && r.AC!==acSel) return false;
+    const hDep = hourFromMinutes(excelDayFractionToMinutes(r.STD));
+    const hArr = hourFromMinutes(excelDayFractionToMinutes(r.STA));
+    if(hSel===null) return true;
+    if(state.heatMode==='DEP') return hDep===hSel;
+    if(state.heatMode==='ARR') return hArr===hSel;
+    return hDep===hSel || hArr===hSel;
+  });
+
+  const labelEl = document.getElementById('serviceHeatFilterLabel');
+  labelEl.textContent = (acSel || hSel!==null)
+    ? `Filtered by cell: ${acSel || 'All AC'} @ ${hSel!==null ? `${String(hSel).padStart(2,'0')}:00` : 'All Hours'} (${state.heatMode})`
+    : `Showing all filtered records (${rows.length.toLocaleString()})`;
+
+  const sample = rows.slice(0, 300);
+  const html = `<table class="min-w-full border border-slate-200">
+    <thead>
+      <tr>
+        <th class="border p-2 bg-slate-100 text-left">Date</th>
+        <th class="border p-2 bg-slate-100 text-left">AC</th>
+        <th class="border p-2 bg-slate-100 text-left">Flight</th>
+        <th class="border p-2 bg-slate-100 text-left">Route</th>
+        <th class="border p-2 bg-slate-100 text-right">STD</th>
+        <th class="border p-2 bg-slate-100 text-right">STA</th>
+        <th class="border p-2 bg-slate-100 text-right">Block Hrs</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${sample.map(r=>`<tr><td class="border p-2">${r['Travel Date']||''}</td><td class="border p-2">${r.AC||''}</td><td class="border p-2">${r.Flight||''}</td><td class="border p-2">${r.ORG||''}-${r.DST||''}</td><td class="border p-2 text-right">${formatExcelTimeHHMM(r.STD)}</td><td class="border p-2 text-right">${formatExcelTimeHHMM(r.STA)}</td><td class="border p-2 text-right">${Number(r.BlockHours||0).toFixed(2)}</td></tr>`).join('')}
+    </tbody>
+  </table>
+  <div class="text-xs text-slate-500 mt-2">Showing ${sample.length.toLocaleString()} of ${rows.length.toLocaleString()} rows.</div>`;
+  document.getElementById('serviceHeatTable').innerHTML = html;
+}
+
+function renderFilters(){
+  renderPills('filterReg', uniq(state.rows.map(r=>r.AC)), state.selected.reg);
+  renderPills('filterOrg', uniq(state.rows.map(r=>r.ORG)), state.selected.org);
+  renderPills('filterDst', uniq(state.rows.map(r=>r.DST)), state.selected.dst);
+  renderPills('filterType', uniq(state.rows.map(r=>r['Transfer Type'])), state.selected.type);
+  renderPills('filterStatus', uniq(state.rows.map(r=>r.Status)), state.selected.status);
+  renderQuarterFilters();
+}
+
+function renderQuarterFilters(){
+  const el = document.getElementById('quarterFilters');
+  const qOrder = {Q1:1,Q2:2,Q3:3,Q4:4};
+  const yq = uniq(state.rows.map(r=>r.yearQuarter).filter(Boolean)).sort((a,b)=>{
+    const ay = Number(a.slice(0,4)), by = Number(b.slice(0,4));
+    if (ay !== by) return ay - by;
+    return (qOrder[a.slice(5)]||9) - (qOrder[b.slice(5)]||9);
+  });
+  const vals = ['ALL', ...yq];
+  el.innerHTML = vals.map(v=>`<button class="pill px-3 py-1 rounded-full text-sm ${state.quarter===v?'active':''}" data-qtr="${v}">${v==='ALL'?'All':v}</button>`).join('');
+  el.querySelectorAll('[data-qtr]').forEach(btn=>btn.addEventListener('click', ()=>{
+    state.quarter = btn.dataset.qtr;
+    render();
+  }));
+}
+
+function updateTabsUI(){
+  document.querySelectorAll('#utilTabs .tab-btn').forEach(btn=>btn.classList.toggle('active', btn.dataset.tab===state.activeTab));
+  document.querySelectorAll('[data-panel]').forEach(p=>p.classList.toggle('hidden', p.dataset.panel!==state.activeTab));
+}
+
+function bind(){
+  document.getElementById('searchInput').addEventListener('input', e=>{ state.search=e.target.value.trim(); render(); });
+  document.getElementById('fromDate').addEventListener('change', e=>{ state.dateFrom=e.target.value || null; render(); });
+  document.getElementById('toDate').addEventListener('change', e=>{ state.dateTo=e.target.value || null; render(); });
+
+  document.getElementById('clearAll').addEventListener('click', ()=>{
+    state.search=''; state.dateFrom=null; state.dateTo=null;
+    state.quarter='ALL';
+    state.heatCellFilter={ac:null,hour:null};
+    state.manualInputs={ releaseGanOps:null, captainAvailable:null };
+    state.selected={ reg:new Set(), org:new Set(), dst:new Set(), type:new Set(), status:new Set() };
+    state.cross={ ac:null, route:null, type:null };
+    document.getElementById('searchInput').value='';
+    document.getElementById('fromDate').value='';
+    document.getElementById('toDate').value='';
+    document.querySelectorAll('#quarterFilters [data-qtr]').forEach(b=>b.classList.toggle('active', b.dataset.qtr==='ALL'));
+    render();
+  });
+
+  const releaseInput = document.getElementById('releaseGanOpsInput');
+  const captainInput = document.getElementById('captainAvailableInput');
+  releaseInput.addEventListener('change', e=>{
+    const v=e.target.value.trim();
+    state.manualInputs.releaseGanOps = v==='' ? null : Number(v);
+    render();
+  });
+  captainInput.addEventListener('change', e=>{
+    const v=e.target.value.trim();
+    state.manualInputs.captainAvailable = v==='' ? null : Number(v);
+    render();
+  });
+
+  document.getElementById('heatmap').addEventListener('click', e=>{
+    const btn = e.target.closest('[data-heat-ac][data-heat-hour]');
+    if(!btn) return;
+    const ac = btn.dataset.heatAc;
+    const hour = Number(btn.dataset.heatHour);
+    if(state.heatCellFilter.ac===ac && state.heatCellFilter.hour===hour){
+      state.heatCellFilter={ac:null,hour:null};
+    } else {
+      state.heatCellFilter={ac,hour};
+    }
+    render();
+  });
+
+  document.getElementById('clearHeatCellFilter').addEventListener('click', ()=>{
+    state.heatCellFilter={ac:null,hour:null};
+    render();
+  });
+
+  const fileInput = document.getElementById('flightFileInput');
+  fileInput.addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const name = file.name.toLowerCase();
+      let rows = [];
+      if (name.endsWith('.json')) {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        rows = Array.isArray(data) ? data : (data.rows || []);
+      } else {
+        const buf = await file.arrayBuffer();
+        rows = loadRowsFromWorkbook(buf);
+      }
+      if (!rows.length) throw new Error('No rows found');
+      normalizeAndLoadRows(rows);
+
+      const dates=state.rows.map(r=>r.travelISO).filter(Boolean).sort();
+      if(dates.length){
+        document.getElementById('fromDate').min=dates[0];
+        document.getElementById('fromDate').max=dates.at(-1);
+        document.getElementById('toDate').min=dates[0];
+        document.getElementById('toDate').max=dates.at(-1);
+        document.getElementById('fromDate').value=dates[0];
+        document.getElementById('toDate').value=dates.at(-1);
+        state.dateFrom=dates[0];
+        state.dateTo=dates.at(-1);
+      }
+      render();
+    } catch (err) {
+      alert('Could not load file. Please upload FlightData .xlsx/.xls/.json with expected columns.');
+      console.error(err);
+    } finally {
+      e.target.value = '';
+    }
+  });
+  const crewReqInput = document.getElementById('crewReqFileInput');
+  crewReqInput.addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const model = loadCrewReqModelFromWorkbook(buf);
+      if (!model) throw new Error('Crew model not parsed');
+      state.crewReqModel = model;
+      render();
+    } catch (err) {
+      alert('Could not parse Crew Requirement file. Please upload the original Crew Req .xlsx.');
+      console.error(err);
+    } finally {
+      e.target.value = '';
+    }
+  });
+
+  document.querySelectorAll('[data-heat-mode]').forEach(btn=>btn.addEventListener('click', ()=>{
+    state.heatMode=btn.dataset.heatMode;
+    document.querySelectorAll('[data-heat-mode]').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    render();
+  }));
+
+  document.querySelectorAll('#utilTabs .tab-btn').forEach(btn=>btn.addEventListener('click', ()=>{
+    state.activeTab=btn.dataset.tab;
+    updateTabsUI();
+  }));
+
+  renderQuarterFilters();
+}
+
+function render(){
+  renderFilters();
+  const list=filtered();
+  const listAllQuarter=filtered(true);
+  updateKPIs(list);
+  updateCharts(list);
+  updateMonthlyQuarterTable(list);
+  updateServiceWindowAnalytics(list);
+  updateCrewPool(list, listAllQuarter);
+  updateHeatmap(list);
+  updateServiceHeatTable(list);
+  if(state.activeTab==='crewpool'){
+    const m = state.crewReqModel || DEFAULT_CREW_REQ_MODEL;
+    const relEl = document.getElementById('releaseGanOpsInput');
+    const capEl = document.getElementById('captainAvailableInput');
+    if (document.activeElement !== relEl) relEl.value = state.manualInputs.releaseGanOps ?? (m.releaseGanOps ?? 0);
+    if (document.activeElement !== capEl) capEl.value = state.manualInputs.captainAvailable ?? (m.captainsAvailable ?? 0);
+  }
+  document.getElementById('subtitle').textContent=`${list.length.toLocaleString()} filtered rows from ${state.rows.length.toLocaleString()} total rows`;
+}
+
+async function init(){
+  const res=await fetch('./data/flightData.json');
+  const data=await res.json();
+  normalizeAndLoadRows(data.rows || []);
+  state.crewReqModel = { ...DEFAULT_CREW_REQ_MODEL };
+
+  const dates=state.rows.map(r=>r.travelISO).filter(Boolean).sort();
+  if(dates.length){
+    document.getElementById('fromDate').min=dates[0];
+    document.getElementById('fromDate').max=dates.at(-1);
+    document.getElementById('toDate').min=dates[0];
+    document.getElementById('toDate').max=dates.at(-1);
+    document.getElementById('fromDate').value=dates[0];
+    document.getElementById('toDate').value=dates.at(-1);
+    state.dateFrom=dates[0];
+    state.dateTo=dates.at(-1);
+  }
+
+  bind();
+  updateTabsUI();
+  render();
+}
+
+init();
+</script>
+</body>
+</html>
