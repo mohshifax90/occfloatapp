@@ -5021,29 +5021,38 @@ export default function Page() {
     setRosterChangeLogs((prev) => [rejectLog, ...prev].slice(0, 800))
   }
 
-  const authenticatedStaff = useMemo(
-    () => store.staff.find((s) => s.id === authStaffId) ?? null,
-    [store.staff, authStaffId],
+  const authenticatedUser = useMemo(
+    () => store.userManagement.find((u) => u.id === authStaffId) ?? null,
+    [store.userManagement, authStaffId],
   )
+  const authenticatedStaff = useMemo(() => {
+    if (!authenticatedUser) return null
+    const dispatchToken = (authenticatedUser.dispatchStaff || "").trim()
+    if (dispatchToken) {
+      const direct =
+        store.staff.find(
+          (s) => `${(s.staffNo || "").trim()} - ${(s.fullName || "").trim()}` === dispatchToken,
+        ) || null
+      if (direct) return direct
+    }
+    const uname = (authenticatedUser.userName || "").trim().toLowerCase()
+    return (
+      store.staff.find((s) => (s.staffNo || "").trim().toLowerCase() === uname) ||
+      store.staff.find((s) => (s.fullName || "").trim().toLowerCase() === uname) ||
+      null
+    )
+  }, [authenticatedUser, store.staff])
   const authenticatedUserAccessFlows = useMemo(() => {
-    if (!authenticatedStaff) return null
+    if (!authenticatedUser) return null
     if (store.userManagement.length === 0) return null
-    const staffToken = `${(authenticatedStaff.staffNo || "").trim()} - ${(authenticatedStaff.fullName || "").trim()}`
-    const userRow =
-      store.userManagement.find(
-        (u) =>
-          normalizeText(u.dispatchStaff || "") === normalizeText(staffToken) ||
-          normalizeText(u.userName || "") === normalizeText(authenticatedStaff.staffNo || ""),
-      ) || null
-    if (!userRow) return new Set<string>()
-    const roleName = (userRow.roleName || "").trim()
+    const roleName = (authenticatedUser.roleName || "").trim()
     if (!roleName) return new Set<string>()
     const roleRow =
       store.roleManagement.find((r) => normalizeText(r.roleName || "") === normalizeText(roleName)) ||
       null
     if (!roleRow) return new Set<string>()
     return new Set(splitMultiValue(roleRow.controlFlows || ""))
-  }, [authenticatedStaff, store.userManagement, store.roleManagement])
+  }, [authenticatedUser, store.userManagement, store.roleManagement])
   const hasAccess = (flowName: string) => {
     if (!authenticatedUserAccessFlows) return true
     return authenticatedUserAccessFlows.has(flowName)
@@ -5538,25 +5547,26 @@ export default function Page() {
   }, [rosterChangeCell, rosterChangeToCode, rosterChangeType, rosterVisibleRows])
 
   const login = () => {
-    const staffNo = loginStaffNo.trim()
+    const userName = loginStaffNo.trim()
     const password = loginPassword
-    const staff = store.staff.find((s) => (s.staffNo || "").trim() === staffNo)
-    if (!staff) {
-      setLoginError("Invalid staff number or password.")
+    const user = store.userManagement.find(
+      (u) =>
+        (u.userName || "").trim().toLowerCase() === userName.toLowerCase() &&
+        (u.status || "Active").trim().toLowerCase() === "active",
+    )
+    if (!user) {
+      setLoginError("Invalid username or password.")
       return
     }
-    const effectivePassword = (staff.loginPassword || "").trim() || (staff.staffNo || "").trim()
+    const effectivePassword = (user.password || "").trim() || (user.userName || "").trim()
     if (password !== effectivePassword) {
-      setLoginError("Invalid staff number or password.")
+      setLoginError("Invalid username or password.")
       return
     }
     setLoginError("")
-    setAuthStaffId(staff.id)
-    window.localStorage.setItem(AUTH_STORAGE_KEY, staff.id)
-    const forceChange =
-      (staff.forcePasswordChange || "").trim().toLowerCase() === "yes" ||
-      effectivePassword === (staff.staffNo || "").trim()
-    setMustChangePassword(forceChange)
+    setAuthStaffId(user.id)
+    window.localStorage.setItem(AUTH_STORAGE_KEY, user.id)
+    setMustChangePassword(false)
   }
 
   const logout = () => {
@@ -5632,12 +5642,12 @@ export default function Page() {
       <main className="container py-5" style={{ maxWidth: 480 }}>
         <div className="card border shadow-sm">
           <div className="card-body p-4">
-            <h1 className="h4 fw-semibold mb-1">OCCfloat Login</h1>
+            <h1 className="h4 fw-semibold mb-1">OCC Dispatch Login</h1>
             <p className="text-muted small mb-4">
-              Login with Staff Number as username and password.
+              Login using User Name and Password from User Management.
             </p>
             <div className="mb-3">
-              <label className="form-label small fw-semibold">Staff Number</label>
+              <label className="form-label small fw-semibold">User Name</label>
               <input
                 className="form-control"
                 value={loginStaffNo}
@@ -5814,7 +5824,7 @@ export default function Page() {
             </div>
             <div className="d-flex align-items-center gap-2">
               <span className="small text-muted d-none d-md-inline">
-                {authenticatedStaff?.fullName || authenticatedStaff?.staffNo || "User"}
+                {authenticatedUser?.fullName || authenticatedUser?.userName || authenticatedStaff?.fullName || authenticatedStaff?.staffNo || "User"}
               </span>
               <Button variant="outline" size="sm" onClick={logout}>
                 Logout
