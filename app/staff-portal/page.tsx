@@ -1192,6 +1192,9 @@ export default function StaffPortalPage() {
             <p className="text-muted small mt-3 mb-0">
               Need access from a manager? Use the main OCCfloat console.
             </p>
+            <p className="text-muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 0 }}>
+              Supabase: {supabase ? "ON" : "OFF"} · URL:{process.env.NEXT_PUBLIC_SUPABASE_URL ? "Y" : "N"} · KEY:{process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ? "Y" : "N"}
+            </p>
             <p className="text-muted" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
               Build: {STAFF_PORTAL_BUILD_TAG}
             </p>
