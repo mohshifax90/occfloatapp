@@ -498,9 +498,7 @@ export default function StaffPortalPage() {
 
   // Login form (shown when no auth staff id is present).
   const [loginStaffNo, setLoginStaffNo] = useState("")
-  const [loginPassword, setLoginPassword] = useState("")
   const [loginError, setLoginError] = useState("")
-  const [loginStage, setLoginStage] = useState<"identify" | "password">("identify")
 
   // Pairing modal state (Ops tab).
   const [pairingDate, setPairingDate] = useState<string | null>(null)
@@ -683,12 +681,14 @@ export default function StaffPortalPage() {
   const myRosterByDate = useMemo(() => {
     if (!me) return new Map<string, string>()
     const map = new Map<string, string>()
+    const meNo = (me.staffNo || "").trim()
+    const meName = (me.fullName || "").trim()
     store.roster.forEach((row) => {
-      if (
-        (row.staffNo || "").trim() === (me.staffNo || "").trim() &&
-        (row.staffName || "").trim() === (me.fullName || "").trim() &&
-        row.date
-      ) {
+      const rowNo = (row.staffNo || "").trim()
+      const rowName = (row.staffName || "").trim()
+      const byStaffNo = meNo && rowNo === meNo
+      const byNameOnly = !meNo && meName && rowName === meName
+      if ((byStaffNo || byNameOnly) && row.date) {
         map.set(row.date, row.shiftCode || "")
       }
     })
@@ -707,9 +707,14 @@ export default function StaffPortalPage() {
       if (name && code) policyCodeByName.set(name, code)
     })
     const map = new Map<string, string>()
+    const meNo = (me.staffNo || "").trim()
+    const meName = (me.fullName || "").trim()
     store.leaves.forEach((leave) => {
       const sno = (leave.staffNo || "").trim()
-      if (sno !== (me.staffNo || "").trim()) return
+      const sname = (leave.staffName || "").trim()
+      const byStaffNo = meNo && sno === meNo
+      const byNameOnly = !meNo && meName && sname === meName
+      if (!(byStaffNo || byNameOnly)) return
       const status = (leave.status || "").trim().toLowerCase()
       if (status === "rejected") return
       const from = leave.fromDate
@@ -875,81 +880,25 @@ export default function StaffPortalPage() {
       setLoginError("Enter your staff number.")
       return
     }
-    const isSpecial1955 = sno === "1955"
     const staff = await findStaffByNo(sno)
-    if (isSpecial1955) {
-      setLoginError("")
-      setLoginStage("password")
-      return
-    }
     if (!staff) {
       setLoginError("Staff number not recognised.")
       return
     }
     if ((staff.activeStatus || "").trim().toLowerCase() === "inactive") {
       setLoginError("This staff record is inactive.")
-      return
-    }
-    setLoginError("")
-    setLoginStage("password")
-  }
-
-  const tryLogin = async () => {
-    const sno = loginStaffNo.trim()
-    const pwd = loginPassword
-    if (!sno) {
-      setLoginError("Enter your staff number.")
-      return
-    }
-    if (!pwd) {
-      setLoginError("Enter your password.")
-      return
-    }
-    let staff = await findStaffByNo(sno)
-    const isSpecial1955 = sno === "1955" && pwd === "admin@1990"
-    if (!staff && isSpecial1955) {
-      const fallbackStaff: Entry = {
-        id: "staff-1955-fallback",
-        createdAt: new Date().toISOString(),
-        staffNo: "1955",
-        fullName: "Mohamed Shifaz",
-        activeStatus: "Active",
-      }
-      setStore((prev) => ({
-        ...prev,
-        staff: prev.staff.some((s) => (s.staffNo || "").trim() === "1955")
-          ? prev.staff
-          : [fallbackStaff, ...prev.staff],
-      }))
-      staff = fallbackStaff
-    }
-    if (!staff) {
-      setLoginError("Staff number not recognised.")
-      return
-    }
-    if ((staff.activeStatus || "").trim().toLowerCase() === "inactive") {
-      setLoginError("This staff record is inactive.")
-      return
-    }
-    const defaultPassword = (staff.loginPassword || "").trim() || (staff.staffNo || "").trim()
-    if (!isSpecial1955 && pwd !== defaultPassword) {
-      setLoginError("Invalid staff number or password.")
       return
     }
     window.localStorage.setItem(AUTH_STORAGE_KEY, staff.id)
     setAuthStaffId(staff.id)
     setLoginError("")
     setLoginStaffNo("")
-    setLoginPassword("")
-    setLoginStage("identify")
   }
 
   const logout = () => {
     window.localStorage.removeItem(AUTH_STORAGE_KEY)
     setAuthStaffId(null)
     setActiveTab("ops")
-    setLoginStage("identify")
-    setLoginPassword("")
     setLoginError("")
   }
 
@@ -1173,7 +1122,7 @@ export default function StaffPortalPage() {
             </div>
             <h1 className="h4 fw-semibold mb-1">Staff Portal</h1>
             <p className="text-muted small mb-4">
-            Enter your staff number and password to view your roster, request changes, and submit roster
+            Enter your staff number to view your roster, request changes, and submit roster
             change requests.
             </p>
             <div className="mb-3">
@@ -1183,57 +1132,21 @@ export default function StaffPortalPage() {
                 value={loginStaffNo}
                 onChange={(e) => setLoginStaffNo(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    if (loginStage === "identify") void continueLogin()
-                    else void tryLogin()
-                  }
+                  if (e.key === "Enter") void continueLogin()
                 }}
                 placeholder="e.g. 1955"
-                disabled={loginStage === "password"}
               />
             </div>
-            {loginStage === "password" ? (
-              <div className="mb-3">
-                <label className="form-label small fw-semibold">Password</label>
-                <input
-                  type="password"
-                  className="form-control"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void tryLogin()
-                  }}
-                  placeholder="Enter password"
-                />
-              </div>
-            ) : null}
             {loginError ? (
               <div className="alert alert-danger py-2 small">{loginError}</div>
             ) : null}
-            <div className="d-flex gap-2">
-              {loginStage === "password" ? (
-                <button
-                  className="btn btn-outline-secondary fw-semibold"
-                  onClick={() => {
-                    setLoginStage("identify")
-                    setLoginPassword("")
-                    setLoginError("")
-                  }}
-                >
-                  Back
-                </button>
-              ) : null}
-              <button
-                className="btn w-100 fw-semibold"
-                onClick={() => {
-                  if (loginStage === "identify") void continueLogin()
-                  else void tryLogin()
-                }}
-                style={{ background: "#1d4ed8", color: "#ffffff" }}
-              >
-                {loginStage === "identify" ? "Continue" : "Login"}
-              </button>
-            </div>
+            <button
+              className="btn w-100 fw-semibold"
+              onClick={() => void continueLogin()}
+              style={{ background: "#1d4ed8", color: "#ffffff" }}
+            >
+              Continue
+            </button>
             <p className="text-muted small mt-3 mb-0">
               Need access from a manager? Use the main OCCfloat console.
             </p>
