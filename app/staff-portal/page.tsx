@@ -504,6 +504,7 @@ export default function StaffPortalPage() {
   const [loginStaffNo, setLoginStaffNo] = useState("")
   const [loginError, setLoginError] = useState("")
   const [loginDebug, setLoginDebug] = useState("")
+  const [supabaseInitError, setSupabaseInitError] = useState("")
 
   // Pairing modal state (Ops tab).
   const [pairingDate, setPairingDate] = useState<string | null>(null)
@@ -538,8 +539,10 @@ export default function StaffPortalPage() {
   })
   const supabase = useMemo(() => {
     try {
-      return createSupabaseClient()
-    } catch {
+      const client = createSupabaseClient()
+      return client
+    } catch (err) {
+      setSupabaseInitError(err instanceof Error ? err.message : String(err))
       return null
     }
   }, [])
@@ -1195,6 +1198,11 @@ export default function StaffPortalPage() {
             <p className="text-muted" style={{ fontSize: 11, marginTop: 6, marginBottom: 0 }}>
               Supabase: {supabase ? "ON" : "OFF"} · URL:{process.env.NEXT_PUBLIC_SUPABASE_URL ? "Y" : "N"} · KEY:{process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ? "Y" : "N"}
             </p>
+            {supabaseInitError ? (
+              <p className="text-danger" style={{ fontSize: 11, marginTop: 4, marginBottom: 0 }}>
+                Supabase init error: {supabaseInitError}
+              </p>
+            ) : null}
             <p className="text-muted" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
               Build: {STAFF_PORTAL_BUILD_TAG}
             </p>
