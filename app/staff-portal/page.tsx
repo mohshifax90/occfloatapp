@@ -86,6 +86,7 @@ type DataStore = {
 type StaffRequest = {
   id: string
   createdAt: string
+  ownerStaffNo?: string
   staffNo: string
   staffName: string
   type: "Leave" | "Attendance" | "Roster Change"
@@ -962,7 +963,8 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffNo: me.staffNo || "",
+      ownerStaffNo: normalizeStaffNo(authStaffNo || me.staffNo || ""),
+      staffNo: normalizeStaffNo(me.staffNo || ""),
       staffName: me.fullName || "",
       type: "Leave",
       status: "Pending Approval",
@@ -1003,7 +1005,8 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffNo: me.staffNo || "",
+      ownerStaffNo: normalizeStaffNo(authStaffNo || me.staffNo || ""),
+      staffNo: normalizeStaffNo(me.staffNo || ""),
       staffName: me.fullName || "",
       type: "Roster Change",
       status: "Pending Peer Acceptance",
@@ -1061,7 +1064,8 @@ export default function StaffPortalPage() {
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
       createdAt: new Date().toISOString(),
-      staffNo: me.staffNo || "",
+      ownerStaffNo: normalizeStaffNo(authStaffNo || me.staffNo || ""),
+      staffNo: normalizeStaffNo(me.staffNo || ""),
       staffName: me.fullName || "",
       type: "Attendance",
       status: "Pending Approval",
@@ -1121,7 +1125,7 @@ export default function StaffPortalPage() {
     const today = toYmd(new Date())
     const next = staffRequests.map((r) => {
       if (r.id !== requestId) return r
-      if ((r.staffNo || "").trim() !== (me.staffNo || "").trim()) return r
+      if (normalizeStaffNo(r.staffNo || "") !== normalizeStaffNo(me.staffNo || "")) return r
       if (r.type !== "Attendance") return r
       if (r.status === "Approved" || r.status === "Rejected" || r.status === "Cancelled") return r
       const anchorDate = (r.fromDate || r.date || "").trim()
@@ -1277,8 +1281,10 @@ export default function StaffPortalPage() {
                 staffRequests
                   .filter(
                     (r) =>
-                      ((r.staffNo || "").trim() === (me.staffNo || "").trim() ||
-                        (authStaffNo && (r.staffNo || "").trim() === authStaffNo)) &&
+                      (normalizeStaffNo(r.staffNo || "") === normalizeStaffNo(me.staffNo || "") ||
+                        normalizeStaffNo(r.ownerStaffNo || "") === normalizeStaffNo(authStaffNo || me.staffNo || "") ||
+                        (authStaffNo &&
+                          normalizeStaffNo(r.staffNo || "") === normalizeStaffNo(authStaffNo))) &&
                       r.type === "Roster Change" &&
                       r.status === "Pending Approval" &&
                       r.date,
@@ -1297,8 +1303,10 @@ export default function StaffPortalPage() {
             )}
             myRequests={staffRequests.filter(
               (r) =>
-                (r.staffNo || "").trim() === (me.staffNo || "").trim() ||
-                (authStaffNo && (r.staffNo || "").trim() === authStaffNo),
+                normalizeStaffNo(r.staffNo || "") === normalizeStaffNo(me.staffNo || "") ||
+                normalizeStaffNo(r.ownerStaffNo || "") === normalizeStaffNo(authStaffNo || me.staffNo || "") ||
+                (authStaffNo &&
+                  normalizeStaffNo(r.staffNo || "") === normalizeStaffNo(authStaffNo)),
             )}
             incomingSwapRequests={staffRequests.filter(
               (r) =>
