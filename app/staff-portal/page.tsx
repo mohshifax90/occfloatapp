@@ -53,6 +53,7 @@ const AUTH_STORAGE_KEY = "occfloat.staffPortalAuthStaffId"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
+const STAFF_PORTAL_BUILD_TAG = "f4092ea"
 
 // ---------------------------------------------------------------------------
 // Minimal mirrors of the types we need from the main app. We keep them loose
@@ -1213,6 +1214,9 @@ export default function StaffPortalPage() {
             </div>
             <p className="text-muted small mt-3 mb-0">
               Need access from a manager? Use the main OCCfloat console.
+            </p>
+            <p className="text-muted" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
+              Build: {STAFF_PORTAL_BUILD_TAG}
             </p>
           </div>
         </div>
