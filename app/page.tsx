@@ -1047,6 +1047,9 @@ function formatYmdToWeekdayShort(ymd: string): string {
 
 function formatDateText(value: string): string {
   if (!value) return value
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return formatYmdToDdMmYy(value)
+  }
   const parsed = new Date(value)
   if (!Number.isNaN(parsed.getTime())) {
     const dd = String(parsed.getDate()).padStart(2, "0")
@@ -1083,6 +1086,17 @@ function getDateRangeInclusive(fromDate: string, toDate: string): Date[] {
     cursor.setDate(cursor.getDate() + 1)
   }
   return result
+}
+
+function normalizeDateOnly(value: string): string {
+  const raw = (value || "").trim()
+  if (!raw) return ""
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
+  const isoDatePrefix = raw.match(/^(\d{4}-\d{2}-\d{2})T/)
+  if (isoDatePrefix) return isoDatePrefix[1]
+  const parsed = new Date(raw)
+  if (!Number.isNaN(parsed.getTime())) return toYmd(parsed)
+  return ""
 }
 
 function calculateShiftDuration(startTime: string, endTime: string): string {
@@ -3864,68 +3878,19 @@ export default function Page() {
         window.alert("Selected leave policy was not found.")
         return
       }
-      const dateRange = getDateRangeInclusive(fromDate, toDate)
-      const weekdayMap = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-      const weekdaysNotCounted = splitMultiValue(policy.nonCountWeekdays || "")
-      const excludeGovPublicHolidays = weekdaysNotCounted.includes("Gov Public Holidays")
-      const holidaySet = new Set<string>()
-      for (const holiday of store.publicHolidays) {
-        const holidayRange = getDateRangeInclusive(
-          holiday.holidayStartDate,
-          holiday.holidayEndDate,
-        )
-        for (const day of holidayRange) {
-          holidaySet.add(toYmd(day))
-        }
-      }
-
-      const excludedDates = new Set<string>()
-      const excludedWeekdayDateKeys = new Set<string>()
-      const govPublicHolidayDateKeys = new Set<string>()
-      for (const day of dateRange) {
-        const dayKey = toYmd(day)
-        const weekdayName = weekdayMap[day.getDay()]
-        if (weekdaysNotCounted.includes(weekdayName)) {
-          excludedDates.add(dayKey)
-          excludedWeekdayDateKeys.add(dayKey)
-        }
-        if (holidaySet.has(dayKey)) {
-          govPublicHolidayDateKeys.add(dayKey)
-          // GH dates inside leave duration are never chargeable.
-          excludedDates.add(dayKey)
-        }
-      }
-
-      const totalCalendarDays = dateRange.length
-      const excludedWeekdayDays = excludedWeekdayDateKeys.size
-      const excludedWeekdayDates = Array.from(excludedWeekdayDateKeys)
-        .sort()
-        .map((d) => formatYmdToDdMmYy(d))
-      // If PH and GH fall on the same day, do not count GH separately.
-      const effectiveGovPublicHolidayDateKeys = new Set(
-        Array.from(govPublicHolidayDateKeys).filter((d) => !excludedWeekdayDateKeys.has(d)),
-      )
-      const publicHolidayDays = effectiveGovPublicHolidayDateKeys.size
-      const govPublicHolidayDates = Array.from(effectiveGovPublicHolidayDateKeys)
-        .sort()
-        .map((d) => formatYmdToDdMmYy(d))
-      const chargeableLeaveDays = Math.max(totalCalendarDays - excludedDates.size, 0)
+      const leaveSummary = calculateLeaveSummary(fromDate, toDate, leavePolicyName)
 
       const leaveEntry: Entry = {
         id: editingEntryId ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         createdAt: new Date().toISOString(),
         ...currentForm,
+        fromDate: leaveSummary.fromDate,
+        toDate: leaveSummary.toDate,
         staffLookup: `${currentForm.staffNo} - ${currentForm.staffName}`,
-        totalCalendarDays: String(totalCalendarDays),
-        excludedWeekdayDetails:
-          excludedWeekdayDays > 0
-            ? `${excludedWeekdayDays} day(s): ${excludedWeekdayDates.join(", ")}`
-            : "0 day(s)",
-        publicHolidayDays:
-          publicHolidayDays > 0
-            ? `${publicHolidayDays} day(s): ${govPublicHolidayDates.join(", ")}`
-            : "0 day(s)",
-        chargeableLeaveDays: String(chargeableLeaveDays),
+        totalCalendarDays: leaveSummary.totalCalendarDays,
+        excludedWeekdayDetails: leaveSummary.excludedWeekdayDetails,
+        publicHolidayDays: leaveSummary.publicHolidayDays,
+        chargeableLeaveDays: leaveSummary.chargeableLeaveDays,
       }
 
       setStore((prev) => ({
@@ -4230,6 +4195,68 @@ export default function Page() {
           : item,
       ),
     }))
+  }
+
+  const calculateLeaveSummary = (fromDateValue: string, toDateValue: string, leavePolicyName: string) => {
+    const fromDate = normalizeDateOnly(fromDateValue)
+    const toDate = normalizeDateOnly(toDateValue) || fromDate
+    const dateRange = getDateRangeInclusive(fromDate, toDate)
+    const weekdayMap = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    const policy = store.leaveAttendanceControl.find(
+      (item) => item.leaveAttendanceType === "Leave" && item.leaveAttendanceName === leavePolicyName,
+    )
+    const weekdaysNotCounted = splitMultiValue(policy?.nonCountWeekdays || "")
+
+    const holidaySet = new Set<string>()
+    for (const holiday of store.publicHolidays) {
+      const holidayRange = getDateRangeInclusive(holiday.holidayStartDate, holiday.holidayEndDate)
+      for (const day of holidayRange) {
+        holidaySet.add(toYmd(day))
+      }
+    }
+
+    const excludedDates = new Set<string>()
+    const excludedWeekdayDateKeys = new Set<string>()
+    const govPublicHolidayDateKeys = new Set<string>()
+    for (const day of dateRange) {
+      const dayKey = toYmd(day)
+      const weekdayName = weekdayMap[day.getDay()]
+      if (weekdaysNotCounted.includes(weekdayName)) {
+        excludedDates.add(dayKey)
+        excludedWeekdayDateKeys.add(dayKey)
+      }
+      if (holidaySet.has(dayKey)) {
+        govPublicHolidayDateKeys.add(dayKey)
+        excludedDates.add(dayKey)
+      }
+    }
+
+    const totalCalendarDays = dateRange.length
+    const excludedWeekdayDays = excludedWeekdayDateKeys.size
+    const excludedWeekdayDates = Array.from(excludedWeekdayDateKeys)
+      .sort()
+      .map((d) => formatYmdToDdMmYy(d))
+    const effectiveGovPublicHolidayDateKeys = new Set(
+      Array.from(govPublicHolidayDateKeys).filter((d) => !excludedWeekdayDateKeys.has(d)),
+    )
+    const publicHolidayDays = effectiveGovPublicHolidayDateKeys.size
+    const govPublicHolidayDates = Array.from(effectiveGovPublicHolidayDateKeys)
+      .sort()
+      .map((d) => formatYmdToDdMmYy(d))
+    const chargeableLeaveDays = Math.max(totalCalendarDays - excludedDates.size, 0)
+
+    return {
+      fromDate,
+      toDate,
+      totalCalendarDays: String(totalCalendarDays),
+      excludedWeekdayDetails:
+        excludedWeekdayDays > 0
+          ? `${excludedWeekdayDays} day(s): ${excludedWeekdayDates.join(", ")}`
+          : "0 day(s)",
+      publicHolidayDays:
+        publicHolidayDays > 0 ? `${publicHolidayDays} day(s): ${govPublicHolidayDates.join(", ")}` : "0 day(s)",
+      chargeableLeaveDays: String(chargeableLeaveDays),
+    }
   }
 
   const resetAllData = () => {
@@ -5242,13 +5269,14 @@ export default function Page() {
 
             const upserts = new Map<string, Entry>()
             leaveReqs.forEach((r) => {
-              const fromDate = (r.fromDate || "").trim()
-              const toDate = (r.toDate || "").trim() || fromDate
+              const fromDate = normalizeDateOnly(r.fromDate || "")
+              const toDate = normalizeDateOnly(r.toDate || "") || fromDate
               if (!fromDate || !toDate) return
               const resolvedLeavePolicyName =
                 (r.leavePolicyName || "").trim() ||
                 Array.from(leavePolicyNames)[0] ||
                 "Leave"
+              const leaveSummary = calculateLeaveSummary(fromDate, toDate, resolvedLeavePolicyName)
               const dedup = `${(r.staffNo || "").trim().toLowerCase()}::${normalizeText(
                 resolvedLeavePolicyName,
               )}::${fromDate}::${toDate}`
@@ -5273,8 +5301,12 @@ export default function Page() {
                 staffNo: r.staffNo || existing?.staffNo || "",
                 staffName: r.staffName || existing?.staffName || "",
                 leavePolicyName: resolvedLeavePolicyName || existing?.leavePolicyName || "Leave",
-                fromDate,
-                toDate,
+                fromDate: leaveSummary.fromDate,
+                toDate: leaveSummary.toDate,
+                totalCalendarDays: leaveSummary.totalCalendarDays,
+                excludedWeekdayDetails: leaveSummary.excludedWeekdayDetails,
+                publicHolidayDays: leaveSummary.publicHolidayDays,
+                chargeableLeaveDays: leaveSummary.chargeableLeaveDays,
                 status: mappedStatus,
                 remarks:
                   mappedStatus === "Rejected" && portalStatus === "cancelled"
