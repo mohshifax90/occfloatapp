@@ -5220,7 +5220,9 @@ export default function Page() {
           if (status === "rejected" || status === "cancelled") return true
           if (status !== "pending approval" && status !== "approved" && status !== "pending") return false
           const policy = (r.leavePolicyName || "").trim()
-          if (!policy) return false
+          // If policy is empty, still import (fallback name is applied below)
+          // so portal requests are never silently dropped.
+          if (!policy) return true
           // If no leave policy is configured yet, still allow import so queue isn't blocked.
           if (leavePolicyNames.size === 0) return true
           return leavePolicyNames.has(policy)
@@ -5243,8 +5245,12 @@ export default function Page() {
               const fromDate = (r.fromDate || "").trim()
               const toDate = (r.toDate || "").trim() || fromDate
               if (!fromDate || !toDate) return
+              const resolvedLeavePolicyName =
+                (r.leavePolicyName || "").trim() ||
+                Array.from(leavePolicyNames)[0] ||
+                "Leave"
               const dedup = `${(r.staffNo || "").trim().toLowerCase()}::${normalizeText(
-                r.leavePolicyName || "",
+                resolvedLeavePolicyName,
               )}::${fromDate}::${toDate}`
               const existing =
                 (r.id ? existingByReqId.get(r.id) : null) || existingByDedup.get(dedup) || null
@@ -5266,7 +5272,7 @@ export default function Page() {
                 createdAt: new Date().toISOString(),
                 staffNo: r.staffNo || existing?.staffNo || "",
                 staffName: r.staffName || existing?.staffName || "",
-                leavePolicyName: r.leavePolicyName || existing?.leavePolicyName || "",
+                leavePolicyName: resolvedLeavePolicyName || existing?.leavePolicyName || "Leave",
                 fromDate,
                 toDate,
                 status: mappedStatus,
