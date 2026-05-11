@@ -118,6 +118,7 @@ type RosterChangeRequest = {
 }
 type StaffPortalRequest = {
   id: string
+  createdAt?: string
   status:
     | "Pending Peer Acceptance"
     | "Pending Approval"
@@ -954,6 +955,21 @@ function normalizeText(value: string): string {
   return (value || "").trim().toLowerCase()
 }
 
+function buildAttendanceDedupKey(input: {
+  staffNo?: string
+  attendanceType?: string
+  fromDate?: string
+  toDate?: string
+  requestSource?: string
+}): string {
+  const staffNo = (input.staffNo || "").trim().toLowerCase()
+  const attendanceType = normalizeText(input.attendanceType || "")
+  const fromDate = (input.fromDate || "").trim()
+  const toDate = (input.toDate || "").trim() || fromDate
+  const source = normalizeText(input.requestSource || "staff portal")
+  return `${staffNo}::${attendanceType}::${fromDate}::${toDate}::${source}`
+}
+
 function isOffCode(value: string): boolean {
   const code = (value || "").trim().toUpperCase()
   return code === "OF" || code === "OFF" || code === "REST"
@@ -1617,6 +1633,28 @@ export default function Page() {
     })
     return rows
   }, [activeStaff, rosterDates, store.roster, leaveCodeByStaffAndDate, govHolidayDateKeys])
+
+  const pendingDutyMarkLockKeys = useMemo(() => {
+    const locked = new Set<string>()
+    const isTerminal = (value: string) => {
+      const v = normalizeText(value || "")
+      return v === "approved" || v === "rejected" || v === "cancelled"
+    }
+    store.attendance.forEach((entry) => {
+      const source = normalizeText(entry.requestSource || "")
+      if (source !== "staffportal") return
+      const workflow = String(entry.workflowStatus || entry.status || "")
+      if (isTerminal(workflow)) return
+      const staffNo = (entry.staffNo || "").trim()
+      const fromDate = (entry.fromDate || "").trim()
+      const toDate = (entry.toDate || "").trim() || fromDate
+      if (!staffNo || !fromDate || !toDate) return
+      getDateRangeInclusive(fromDate, toDate).forEach((day) => {
+        locked.add(`${staffNo}::${toYmd(day)}`)
+      })
+    })
+    return locked
+  }, [store.attendance])
 
   const rosterVisibleRows = useMemo(() => {
     const q = rosterView.staffSearch.trim().toLowerCase()
@@ -5169,6 +5207,86 @@ export default function Page() {
           setRosterChangeLogs((prev) => [...toAddLog, ...prev].slice(0, 800))
         }
 
+        // Import staff-portal leave requests into Staff Leaves queue.
+        const leavePolicyNames = new Set(
+          store.leaveAttendanceControl
+            .filter((x) => normalizeText(x.leaveAttendanceType || "") === "leave")
+            .map((x) => (x.leaveAttendanceName || "").trim())
+            .filter(Boolean),
+        )
+        const leaveReqs = requests.filter((r) => {
+          if (r.type !== "Leave") return false
+          const status = normalizeText(r.status || "")
+          if (status === "rejected" || status === "cancelled") return true
+          if (status !== "pending approval" && status !== "approved" && status !== "pending") return false
+          const policy = (r.leavePolicyName || "").trim()
+          if (!policy) return false
+          // If no leave policy is configured yet, still allow import so queue isn't blocked.
+          if (leavePolicyNames.size === 0) return true
+          return leavePolicyNames.has(policy)
+        })
+        if (leaveReqs.length > 0) {
+          setStore((prev) => {
+            const existingByReqId = new Map<string, Entry>()
+            const existingByDedup = new Map<string, Entry>()
+            prev.leaves.forEach((l) => {
+              const reqId = (l.portalRequestId || "").trim()
+              if (reqId) existingByReqId.set(reqId, l)
+              const dedup = `${(l.staffNo || "").trim().toLowerCase()}::${normalizeText(
+                l.leavePolicyName || "",
+              )}::${(l.fromDate || "").trim()}::${(l.toDate || "").trim() || (l.fromDate || "").trim()}`
+              existingByDedup.set(dedup, l)
+            })
+
+            const upserts = new Map<string, Entry>()
+            leaveReqs.forEach((r) => {
+              const fromDate = (r.fromDate || "").trim()
+              const toDate = (r.toDate || "").trim() || fromDate
+              if (!fromDate || !toDate) return
+              const dedup = `${(r.staffNo || "").trim().toLowerCase()}::${normalizeText(
+                r.leavePolicyName || "",
+              )}::${fromDate}::${toDate}`
+              const existing =
+                (r.id ? existingByReqId.get(r.id) : null) || existingByDedup.get(dedup) || null
+              const rowId =
+                existing?.id || `leave_portal_${r.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`}`
+              const portalStatus = normalizeText(r.status || "")
+              const mappedStatus =
+                portalStatus === "approved"
+                  ? "Approved"
+                  : portalStatus === "rejected"
+                    ? "Rejected"
+                    : portalStatus === "cancelled"
+                      ? "Rejected"
+                      : "Pending"
+
+              upserts.set(rowId, {
+                ...existing,
+                id: rowId,
+                createdAt: new Date().toISOString(),
+                staffNo: r.staffNo || existing?.staffNo || "",
+                staffName: r.staffName || existing?.staffName || "",
+                leavePolicyName: r.leavePolicyName || existing?.leavePolicyName || "",
+                fromDate,
+                toDate,
+                status: mappedStatus,
+                remarks:
+                  mappedStatus === "Rejected" && portalStatus === "cancelled"
+                    ? "Cancelled by staff from portal"
+                    : r.reason || existing?.remarks || "Leave request from staff portal",
+                portalRequestId: r.id || existing?.portalRequestId || "",
+              })
+            })
+
+            if (upserts.size === 0) return prev
+            const nextLeaves = prev.leaves.map((l) => upserts.get(l.id) || l)
+            upserts.forEach((entry, id) => {
+              if (!nextLeaves.some((x) => x.id === id)) nextLeaves.unshift(entry)
+            })
+            return { ...prev, leaves: nextLeaves }
+          })
+        }
+
         // Import staff-portal duty mark requests into Attendance queue.
         const normAttendanceName = (v: string) =>
           (v || "")
@@ -5219,34 +5337,63 @@ export default function Page() {
           setStore((prev) => {
             const existingReqIds = new Set(prev.attendance.map((a) => (a.portalRequestId || "").trim()))
             const existingByReqId = new Map<string, Entry>()
+            const existingByDedupKey = new Map<string, Entry>()
             prev.attendance.forEach((a) => {
               const id = (a.portalRequestId || "").trim()
               if (id) existingByReqId.set(id, a)
+              const dedupKey = buildAttendanceDedupKey({
+                staffNo: a.staffNo || "",
+                attendanceType: a.attendanceType || a.leavePolicyName || "",
+                fromDate: a.fromDate || "",
+                toDate: a.toDate || a.fromDate || "",
+                requestSource: a.requestSource || "Staff Portal",
+              })
+              if (dedupKey) existingByDedupKey.set(dedupKey, a)
             })
-            const additions: Entry[] = []
+            const additionsById = new Map<string, Entry>()
             attendanceReqs.forEach((r) => {
-              if (!r.id || existingReqIds.has(r.id)) return
-              additions.push({
-                id: `att_portal_${r.id}`,
+              const submittedDate = (r.createdAt || "").slice(0, 10) || toYmd(new Date())
+              const attendanceType = r.dutyMarkType || r.leavePolicyName || ""
+              const fromDate = r.fromDate || ""
+              const toDate = r.toDate || r.fromDate || ""
+              const dedupKey = buildAttendanceDedupKey({
+                staffNo: r.staffNo || "",
+                attendanceType,
+                fromDate,
+                toDate,
+                requestSource: "Staff Portal",
+              })
+              const existing =
+                (r.id ? existingByReqId.get(r.id) : null) ||
+                existingByDedupKey.get(dedupKey) ||
+                null
+              const rowId = existing?.id || `att_portal_${r.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`}`
+              const nextRow: Entry = {
+                ...existing,
+                id: rowId,
                 createdAt: new Date().toISOString(),
-                date: r.fromDate || r.date || "",
-                fromDate: r.fromDate || "",
-                toDate: r.toDate || r.fromDate || "",
+                date: submittedDate,
+                fromDate,
+                toDate,
                 noOfDays: r.noOfDays || "",
                 staffNo: r.staffNo || "",
                 staffName: r.staffName || "",
-                attendanceType: r.dutyMarkType || r.leavePolicyName || "",
+                attendanceType,
                 status: "Pending",
                 workflowStatus: "Pending",
                 approvalStatus: "Pending",
                 documentStatus: "Not Required",
                 documentName: r.documentName || "",
                 requestSource: "Staff Portal",
-                portalRequestId: r.id,
+                portalRequestId: r.id || existing?.portalRequestId || "",
                 remarks: r.reason || "Duty mark request from staff portal",
-              })
+              }
+              additionsById.set(nextRow.id, nextRow)
+              if (r.id) existingReqIds.add(r.id)
             })
             const updated = prev.attendance.map((a) => {
+              const direct = additionsById.get(a.id)
+              if (direct) return direct
               const reqId = (a.portalRequestId || "").trim()
               if (!reqId) return a
               if (cancelledAttendanceReqIds.has(reqId)) {
@@ -5276,8 +5423,11 @@ export default function Page() {
                 remarks: a.remarks || req.reason || "",
               }
             })
-            if (additions.length === 0) return { ...prev, attendance: updated }
-            return { ...prev, attendance: [...additions, ...updated] }
+            const merged = [...updated]
+            additionsById.forEach((row, id) => {
+              if (!merged.some((m) => m.id === id)) merged.unshift(row)
+            })
+            return { ...prev, attendance: merged }
           })
         }
       } catch {
@@ -5395,9 +5545,9 @@ export default function Page() {
 
   const approveAttendanceRequest = (entryId: string) => {
     let reqId = ""
-    setStore((prev) => ({
-      ...prev,
-      attendance: prev.attendance.map((a) => {
+    setStore((prev) => {
+      const approvedEntry = prev.attendance.find((a) => a.id === entryId)
+      const nextAttendance = prev.attendance.map((a) => {
         if (a.id !== entryId) return a
         reqId = a.portalRequestId || ""
         return {
@@ -5406,8 +5556,36 @@ export default function Page() {
           workflowStatus: "Approved",
           approvalStatus: "Approved",
         }
-      }),
-    }))
+      })
+
+      let nextRoster = [...prev.roster]
+      if (approvedEntry) {
+        const markName = normalizeText(
+          approvedEntry.attendanceType || approvedEntry.leavePolicyName || approvedEntry.type || "",
+        )
+        const resolvedCode = markName.includes("medical")
+          ? "MC"
+          : markName.includes("sick")
+            ? "SL"
+            : ""
+        const fromDate = (approvedEntry.fromDate || "").trim()
+        const toDate = (approvedEntry.toDate || "").trim() || fromDate
+        const staffNo = (approvedEntry.staffNo || "").trim()
+        const staffName = (approvedEntry.staffName || "").trim()
+        if (resolvedCode && fromDate && toDate && staffNo) {
+          getDateRangeInclusive(fromDate, toDate).forEach((d) => {
+            const ymd = toYmd(d)
+            nextRoster = setRosterCodeForCell(nextRoster, staffNo, staffName, ymd, resolvedCode)
+          })
+        }
+      }
+
+      return {
+        ...prev,
+        attendance: nextAttendance,
+        roster: nextRoster,
+      }
+    })
     if (reqId) syncStaffPortalRequestStatus(reqId, "Approved")
   }
 
@@ -5480,17 +5658,37 @@ export default function Page() {
       let alreadyImported = 0
       setStore((prev) => {
         const existingReqIds = new Set(prev.attendance.map((a) => (a.portalRequestId || "").trim()))
+        const existingByDedupKey = new Map<string, Entry>()
+        prev.attendance.forEach((a) => {
+          const dedupKey = buildAttendanceDedupKey({
+            staffNo: a.staffNo || "",
+            attendanceType: a.attendanceType || a.leavePolicyName || "",
+            fromDate: a.fromDate || "",
+            toDate: a.toDate || a.fromDate || "",
+            requestSource: a.requestSource || "Staff Portal",
+          })
+          if (dedupKey) existingByDedupKey.set(dedupKey, a)
+        })
         const additions: Entry[] = []
         candidates.forEach((r) => {
-          if (!r.id) return
-          if (existingReqIds.has(r.id)) {
+          const dedupKey = buildAttendanceDedupKey({
+            staffNo: r.staffNo || "",
+            attendanceType: r.dutyMarkType || r.leavePolicyName || "",
+            fromDate: r.fromDate || "",
+            toDate: r.toDate || r.fromDate || "",
+            requestSource: "Staff Portal",
+          })
+          if ((r.id && existingReqIds.has(r.id)) || existingByDedupKey.has(dedupKey)) {
             alreadyImported += 1
             return
           }
+          const submittedDate = (r.createdAt || "").slice(0, 10) || toYmd(new Date())
+          const existing = existingByDedupKey.get(dedupKey)
           additions.push({
-            id: `att_backfill_${r.id}`,
+            ...(existing || {}),
+            id: existing?.id || `att_backfill_${r.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`}`,
             createdAt: new Date().toISOString(),
-            date: r.fromDate || r.date || "",
+            date: submittedDate,
             fromDate: r.fromDate || "",
             toDate: r.toDate || r.fromDate || "",
             noOfDays: r.noOfDays || "",
@@ -6340,12 +6538,19 @@ export default function Page() {
                               ),
                               renderCell: (params: GridRenderCellParams) => {
                                 const code = String(params.value || "-")
+                                const rowStaffNo = String(params.row.staffNo || "").trim()
+                                const rowStaffName = String(params.row.staffName || "").trim()
+                                const rowLevel = String(params.row.level || "")
+                                const isDutyMarkLocked = pendingDutyMarkLockKeys.has(`${rowStaffNo}::${date}`)
+                                const lockTitle = "Duty mark pending approval. Roster code is locked."
                                 if (code === "-") return <span className="text-body-tertiary">-</span>
                                 if (isOffCode(code)) {
                                   const badge = (
                                     <span className="code-cell" style={{ background: ROSTER_OFF_COLOR.bg, color: ROSTER_OFF_COLOR.text }}>OF</span>
                                   )
-                                  if (rosterDirectEditMode) return badge
+                                  if (rosterDirectEditMode || isDutyMarkLocked) {
+                                    return <span title={isDutyMarkLocked ? lockTitle : undefined}>{badge}</span>
+                                  }
                                   return (
                                     <button
                                       type="button"
@@ -6353,9 +6558,9 @@ export default function Page() {
                                       onClick={() =>
                                         openRosterChangePopup({
                                           date,
-                                          staffNo: String(params.row.staffNo || ""),
-                                          staffName: String(params.row.staffName || ""),
-                                          level: String(params.row.level || ""),
+                                          staffNo: rowStaffNo,
+                                          staffName: rowStaffName,
+                                          level: rowLevel,
                                           code: "OF",
                                         })
                                       }
@@ -6366,7 +6571,9 @@ export default function Page() {
                                 }
                                 if (code === "AL") {
                                   const badge = <span className="code-cell" style={{ background: ROSTER_AL_COLOR.bg, color: ROSTER_AL_COLOR.text }}>{code}</span>
-                                  if (rosterDirectEditMode) return badge
+                                  if (rosterDirectEditMode || isDutyMarkLocked) {
+                                    return <span title={isDutyMarkLocked ? lockTitle : undefined}>{badge}</span>
+                                  }
                                   return (
                                     <button
                                       type="button"
@@ -6374,9 +6581,9 @@ export default function Page() {
                                       onClick={() =>
                                         openRosterChangePopup({
                                           date,
-                                          staffNo: String(params.row.staffNo || ""),
-                                          staffName: String(params.row.staffName || ""),
-                                          level: String(params.row.level || ""),
+                                          staffNo: rowStaffNo,
+                                          staffName: rowStaffName,
+                                          level: rowLevel,
                                           code,
                                         })
                                       }
@@ -6387,7 +6594,9 @@ export default function Page() {
                                 }
                                 if (code === "GH") {
                                   const badge = <span className="code-cell" style={{ background: ROSTER_GH_COLOR.bg, color: ROSTER_GH_COLOR.text }}>{code}</span>
-                                  if (rosterDirectEditMode) return badge
+                                  if (rosterDirectEditMode || isDutyMarkLocked) {
+                                    return <span title={isDutyMarkLocked ? lockTitle : undefined}>{badge}</span>
+                                  }
                                   return (
                                     <button
                                       type="button"
@@ -6395,9 +6604,9 @@ export default function Page() {
                                       onClick={() =>
                                         openRosterChangePopup({
                                           date,
-                                          staffNo: String(params.row.staffNo || ""),
-                                          staffName: String(params.row.staffName || ""),
-                                          level: String(params.row.level || ""),
+                                          staffNo: rowStaffNo,
+                                          staffName: rowStaffName,
+                                          level: rowLevel,
                                           code,
                                         })
                                       }
@@ -6408,7 +6617,9 @@ export default function Page() {
                                 }
                                 if (code === "PH") {
                                   const badge = <span className="code-cell" style={{ background: ROSTER_PH_COLOR.bg, color: ROSTER_PH_COLOR.text }}>{code}</span>
-                                  if (rosterDirectEditMode) return badge
+                                  if (rosterDirectEditMode || isDutyMarkLocked) {
+                                    return <span title={isDutyMarkLocked ? lockTitle : undefined}>{badge}</span>
+                                  }
                                   return (
                                     <button
                                       type="button"
@@ -6416,9 +6627,9 @@ export default function Page() {
                                       onClick={() =>
                                         openRosterChangePopup({
                                           date,
-                                          staffNo: String(params.row.staffNo || ""),
-                                          staffName: String(params.row.staffName || ""),
-                                          level: String(params.row.level || ""),
+                                          staffNo: rowStaffNo,
+                                          staffName: rowStaffName,
+                                          level: rowLevel,
                                           code,
                                         })
                                       }
@@ -6430,7 +6641,9 @@ export default function Page() {
                                 const color = rosterShiftColorsByCode.get(code)
                                 if (!color) return code
                                 const badge = <span className="code-cell" style={{ background: color.bg, color: color.text }}>{code}</span>
-                                if (rosterDirectEditMode) return badge
+                                if (rosterDirectEditMode || isDutyMarkLocked) {
+                                  return <span title={isDutyMarkLocked ? lockTitle : undefined}>{badge}</span>
+                                }
                                 return (
                                   <button
                                     type="button"
@@ -6438,9 +6651,9 @@ export default function Page() {
                                     onClick={() =>
                                       openRosterChangePopup({
                                         date,
-                                        staffNo: String(params.row.staffNo || ""),
-                                        staffName: String(params.row.staffName || ""),
-                                        level: String(params.row.level || ""),
+                                        staffNo: rowStaffNo,
+                                        staffName: rowStaffName,
+                                        level: rowLevel,
                                         code,
                                       })
                                     }
@@ -6457,6 +6670,8 @@ export default function Page() {
                             if (!rosterDirectEditMode) return false
                             const field = String(params.field || "")
                             if (!/^\d{4}-\d{2}-\d{2}$/.test(field)) return false
+                            const staffNo = String(params.row?.staffNo || "").trim()
+                            if (pendingDutyMarkLockKeys.has(`${staffNo}::${field}`)) return false
                             const today = toYmd(new Date())
                             return field > today
                           }}
