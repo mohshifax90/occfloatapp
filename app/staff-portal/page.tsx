@@ -518,6 +518,7 @@ export default function StaffPortalPage() {
     toYmd(new Date()),
   )
   const [isLeaveRequestModalOpen, setIsLeaveRequestModalOpen] = useState(false)
+  const [editingLeaveRequestId, setEditingLeaveRequestId] = useState<string | null>(null)
 
   // Leave + roster-change request forms.
   const [leaveForm, setLeaveForm] = useState({
@@ -806,6 +807,27 @@ export default function StaffPortalPage() {
         .filter(Boolean),
     [store.leaveAttendanceControl],
   )
+  const selectedLeavePolicyName = (leaveForm.leavePolicyName || leavePolicyOptions[0] || "").trim()
+  const isSelectedLeaveAnnual = useMemo(() => {
+    const selected = store.leaveAttendanceControl.find(
+      (p) =>
+        (p.leaveAttendanceType || "").trim().toLowerCase() === "leave" &&
+        (p.leaveAttendanceName || "").trim() === selectedLeavePolicyName,
+    )
+    const typeCode = (selected?.typeCode || "").trim().toUpperCase()
+    return typeCode === "AL" || selectedLeavePolicyName.toLowerCase().includes("annual")
+  }, [store.leaveAttendanceControl, selectedLeavePolicyName])
+
+  const dutyMarkTypeOptions = useMemo(() => {
+    const fromPolicy = store.leaveAttendanceControl
+      .filter((p) => (p.leaveAttendanceType || "").trim().toLowerCase() === "attendance")
+      .map((p) => (p.leaveAttendanceName || "").trim())
+      .filter(Boolean)
+    const unique = Array.from(new Set(fromPolicy))
+    return unique.length > 0
+      ? unique
+      : ["Medical", "Sick Leave", "Family Responsible Leave"]
+  }, [store.leaveAttendanceControl])
 
   const allShiftCodes = useMemo(() => {
     const codes = new Set<string>()
@@ -954,11 +976,65 @@ export default function StaffPortalPage() {
   // ------------------------------------------------------------------
   // Submit handlers.
   // ------------------------------------------------------------------
-  const submitLeaveRequest = () => {
-    if (!me) return
+  const submitLeaveRequest = (): boolean => {
+    if (!me) return false
     if (!leaveForm.fromDate || !leaveForm.toDate) {
       window.alert("From and To dates are required.")
-      return
+      return false
+    }
+    if (leaveForm.toDate < leaveForm.fromDate) {
+      window.alert('"To Date" must be after or equal to "From Date".')
+      return false
+    }
+    const selectedLeaveType = (leaveForm.leavePolicyName || leavePolicyOptions[0] || "").trim()
+    const selectedPolicy = store.leaveAttendanceControl.find(
+      (row) =>
+        (row.leaveAttendanceType || "").trim().toLowerCase() === "leave" &&
+        (row.leaveAttendanceName || "").trim() === selectedLeaveType,
+    )
+    const selectedTypeCode = (selectedPolicy?.typeCode || "").trim().toUpperCase()
+    const isAnnualLeave =
+      selectedTypeCode === "AL" || selectedLeaveType.toLowerCase().includes("annual")
+    if (isAnnualLeave && leaveForm.fromDate < todayYmd) {
+      window.alert("Annual leave cannot be requested for past dates.")
+      return false
+    }
+    const isResubmission = Boolean(editingLeaveRequestId)
+    if (isResubmission && !leaveForm.reason.trim()) {
+      window.alert("Remarks are required when resubmitting a leave request.")
+      return false
+    }
+    if (isResubmission) {
+      const next: StaffRequest[] = staffRequests.map((r) => {
+        if (r.id !== editingLeaveRequestId) return r
+        if (r.type !== "Leave") return r
+        return {
+          ...r,
+          leavePolicyName: selectedLeaveType,
+          fromDate: leaveForm.fromDate,
+          toDate: leaveForm.toDate,
+          reason: leaveForm.reason.trim(),
+          status: "Pending Approval" as const,
+          createdAt: new Date().toISOString(),
+          documentName: "",
+          documentData: "",
+          documentUploadedAt: "",
+        }
+      })
+      setStaffRequests(next)
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(
+            STAFF_PORTAL_REQUESTS_KEY,
+            JSON.stringify(next),
+          )
+        } catch {
+          // localStorage may be unavailable.
+        }
+      }
+      setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+      setEditingLeaveRequestId(null)
+      return true
     }
     const req: StaffRequest = {
       id: `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
@@ -968,7 +1044,7 @@ export default function StaffPortalPage() {
       staffName: me.fullName || "",
       type: "Leave",
       status: "Pending Approval",
-      leavePolicyName: leaveForm.leavePolicyName || leavePolicyOptions[0] || "",
+      leavePolicyName: selectedLeaveType,
       fromDate: leaveForm.fromDate,
       toDate: leaveForm.toDate,
       reason: leaveForm.reason,
@@ -986,6 +1062,21 @@ export default function StaffPortalPage() {
       }
     }
     setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+    setEditingLeaveRequestId(null)
+    return true
+  }
+
+  const editLeaveRequest = (requestId: string) => {
+    const req = staffRequests.find((r) => r.id === requestId)
+    if (!req || req.type !== "Leave") return
+    setLeaveForm({
+      leavePolicyName: req.leavePolicyName || leavePolicyOptions[0] || "",
+      fromDate: req.fromDate || "",
+      toDate: req.toDate || "",
+      reason: req.reason || "",
+    })
+    setEditingLeaveRequestId(req.id)
+    setIsLeaveRequestModalOpen(true)
   }
 
   const submitChangeRequest = () => {
@@ -1317,6 +1408,7 @@ export default function StaffPortalPage() {
             onRespondSwap={respondToSwapRequest}
             onUploadRequestDocument={uploadRequestDocument}
             onCancelAttendanceRequest={cancelAttendanceRequest}
+            onEditLeaveRequest={editLeaveRequest}
           />
         ) : null}
 
@@ -1339,7 +1431,11 @@ export default function StaffPortalPage() {
             profilePairingDate={profilePairingDate}
             setProfilePairingDate={setProfilePairingDate}
             profilePairing={profilePairing}
-            onOpenLeaveRequest={() => setIsLeaveRequestModalOpen(true)}
+            onOpenLeaveRequest={() => {
+              setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+              setEditingLeaveRequestId(null)
+              setIsLeaveRequestModalOpen(true)
+            }}
             onLogout={logout}
           />
         ) : null}
@@ -1351,13 +1447,26 @@ export default function StaffPortalPage() {
           className="modal show d-block"
           tabIndex={-1}
           style={{ background: "rgba(0,0,0,0.5)" }}
-          onClick={() => setIsLeaveRequestModalOpen(false)}
+          onClick={() => {
+            setIsLeaveRequestModalOpen(false)
+            setEditingLeaveRequestId(null)
+            setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+          }}
         >
           <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
             <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
               <div className="modal-header border-0 pb-0">
-                <h5 className="modal-title">New leave request</h5>
-                <button className="btn btn-sm btn-light rounded-circle" onClick={() => setIsLeaveRequestModalOpen(false)}>
+                <h5 className="modal-title">
+                  {editingLeaveRequestId ? "Edit leave request" : "New leave request"}
+                </h5>
+                <button
+                  className="btn btn-sm btn-light rounded-circle"
+                  onClick={() => {
+                    setIsLeaveRequestModalOpen(false)
+                    setEditingLeaveRequestId(null)
+                    setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+                  }}
+                >
                   <X size={14} />
                 </button>
               </div>
@@ -1405,6 +1514,7 @@ export default function StaffPortalPage() {
                       type="date"
                       className="form-control"
                       value={leaveForm.fromDate}
+                      min={isSelectedLeaveAnnual ? todayYmd : undefined}
                       onChange={(e) =>
                         setLeaveForm((f) => ({ ...f, fromDate: e.target.value }))
                       }
@@ -1416,6 +1526,7 @@ export default function StaffPortalPage() {
                       type="date"
                       className="form-control"
                       value={leaveForm.toDate}
+                      min={isSelectedLeaveAnnual ? todayYmd : undefined}
                       onChange={(e) =>
                         setLeaveForm((f) => ({ ...f, toDate: e.target.value }))
                       }
@@ -1435,17 +1546,27 @@ export default function StaffPortalPage() {
                 </div>
               </div>
               <div className="modal-footer border-0 pt-0">
-                <button className="btn btn-outline-secondary" onClick={() => setIsLeaveRequestModalOpen(false)}>
+                <button
+                  className="btn btn-outline-secondary"
+                  onClick={() => {
+                    setIsLeaveRequestModalOpen(false)
+                    setEditingLeaveRequestId(null)
+                    setLeaveForm({ leavePolicyName: "", fromDate: "", toDate: "", reason: "" })
+                  }}
+                >
                   Cancel
                 </button>
                 <button
                   className="btn btn-primary"
                   onClick={() => {
-                    submitLeaveRequest()
-                    setIsLeaveRequestModalOpen(false)
+                    const ok = submitLeaveRequest()
+                    if (ok) {
+                      setIsLeaveRequestModalOpen(false)
+                    }
                   }}
                 >
-                  <Send size={14} className="me-1" /> Submit leave request
+                  <Send size={14} className="me-1" />
+                  {editingLeaveRequestId ? "Resubmit leave request" : "Submit leave request"}
                 </button>
               </div>
             </div>
@@ -1678,9 +1799,11 @@ export default function StaffPortalPage() {
                           }))
                         }
                       >
-                        <option value="Medical">Medical</option>
-                        <option value="Sick Leave">Sick Leave</option>
-                        <option value="Family Responsible Leave">Family Responsible Leave</option>
+                        {dutyMarkTypeOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div className="row g-2">
@@ -2781,6 +2904,7 @@ function LeaveView(props: {
   onRespondSwap: (requestId: string, accept: boolean) => void
   onUploadRequestDocument: (requestId: string, file: File) => void
   onCancelAttendanceRequest: (requestId: string) => void
+  onEditLeaveRequest: (requestId: string) => void
 }) {
   const {
     me,
@@ -2790,6 +2914,7 @@ function LeaveView(props: {
     onRespondSwap,
     onUploadRequestDocument,
     onCancelAttendanceRequest,
+    onEditLeaveRequest,
   } = props
   const [expandedRequestSteppers, setExpandedRequestSteppers] = useState<Set<string>>(new Set())
   const todayYmd = toYmd(new Date())
@@ -2904,6 +3029,19 @@ function LeaveView(props: {
                     ) : null}
                     {req.reason ? (
                       <div className="small mt-1">{req.reason}</div>
+                    ) : null}
+                    {req.type === "Leave" &&
+                    req.status !== "Approved" &&
+                    req.status !== "Cancelled" ? (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary"
+                          onClick={() => onEditLeaveRequest(req.id)}
+                        >
+                          Edit Date / Resubmit
+                        </button>
+                      </div>
                     ) : null}
                     {(() => {
                       const anchorDate = (req.fromDate || req.date || "").trim()
