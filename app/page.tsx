@@ -29,6 +29,7 @@ import {
   UserCog,
   UserPlus,
   Users,
+  X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -43,6 +44,10 @@ import AircraftReportModule from "@/components/aircraft-report-module"
 
 type ModuleKey =
   | "dashboard"
+  | "crewRostering"
+  | "crewLeavePlanner"
+  | "crewDataBase"
+  | "crewTrainingPlan"
   | "roleManagement"
   | "userManagement"
   | "staff"
@@ -233,6 +238,14 @@ function attendanceStatusStyle(value: string): React.CSSProperties {
 }
 const ACCESS_CONTROL_FLOWS = [
   "Dashboard > View",
+  "Crew Operation > Crew Rostering > View",
+  "Crew Operation > Crew Rostering > Edit",
+  "Crew Operation > Crew Leave Planner > View",
+  "Crew Operation > Crew Leave Planner > Edit",
+  "Crew Operation > Crew Data Base > View",
+  "Crew Operation > Crew Data Base > Edit",
+  "Crew Operation > Crew Training Plan > View",
+  "Crew Operation > Crew Training Plan > Edit",
 
   "Staff > Create Staff > View",
   "Staff > Create Staff > Edit",
@@ -283,6 +296,73 @@ const MODULES: ModuleConfig[] = [
     key: "dashboard",
     title: "Dashboard",
     description: "Overview of OCC operations and quick access to modules.",
+    fields: [],
+    columns: [],
+  },
+  {
+    key: "crewRostering",
+    title: "Crew Rostering",
+    description: "Blank module workspace for Crew Operation > Crew Rostering.",
+    fields: [],
+    columns: [],
+  },
+  {
+    key: "crewLeavePlanner",
+    title: "Crew Leave Planner",
+    description: "Blank module workspace for Crew Operation > Crew Leave Planner.",
+    fields: [],
+    columns: [],
+  },
+  {
+    key: "crewDataBase",
+    title: "Crew Data Base",
+    description: "Manage crew profiles, status, and bulk updates.",
+    fields: [
+      { key: "crewCode", label: "Crew Code", type: "text", required: true },
+      { key: "crewName", label: "Crew Name", type: "text", required: true },
+      { key: "crewType", label: "Crew Type", type: "text" },
+      { key: "crewCategory", label: "Crew Category", type: "text" },
+      { key: "joiningDate", label: "Joining Date", type: "date" },
+      { key: "releaseDate", label: "Release Date", type: "date" },
+      { key: "emailId", label: "Email ID", type: "text" },
+      { key: "mobileNo", label: "Mobile No", type: "text" },
+      { key: "employeeNo", label: "Employee No", type: "text" },
+      {
+        key: "gender",
+        label: "Gender",
+        type: "select",
+        options: ["", "M", "F"],
+      },
+      {
+        key: "activeStatus",
+        label: "Active Status",
+        type: "select",
+        options: ["Active", "Inactive"],
+        required: true,
+      },
+      { key: "inactiveDate", label: "Inactive Date", type: "date" },
+      { key: "inactiveReason", label: "Inactive Reason", type: "textarea" },
+    ],
+    columns: [
+      "crewCode",
+      "crewName",
+      "crewType",
+      "crewCategory",
+      "joiningDate",
+      "releaseDate",
+      "emailId",
+      "mobileNo",
+      "employeeNo",
+      "gender",
+      "activeStatus",
+      "inactiveDate",
+      "inactiveReason",
+    ],
+  },
+  {
+    key: "crewTrainingPlan",
+    title: "Crew Training Plan",
+    description: "Blank module workspace for Crew Operation > Crew Training Plan.",
     fields: [],
     columns: [],
   },
@@ -833,6 +913,16 @@ type NavGroup = {
 
 const NAV_GROUPS: NavGroup[] = [
   {
+    title: "Crew Operation",
+    icon: Users,
+    items: [
+      { key: "crewRostering", label: "Crew Rostering", icon: CalendarDays },
+      { key: "crewLeavePlanner", label: "Crew Leave Planner", icon: ClipboardList },
+      { key: "crewDataBase", label: "Crew Data Base", icon: UserPlus },
+      { key: "crewTrainingPlan", label: "Crew Training Plan", icon: Award },
+    ],
+  },
+  {
     title: "Staff",
     icon: Users,
     items: [
@@ -879,6 +969,10 @@ const NAV_GROUPS: NavGroup[] = [
 function getEmptyStore(): DataStore {
   return {
     dashboard: [],
+    crewRostering: [],
+    crewLeavePlanner: [],
+    crewDataBase: [],
+    crewTrainingPlan: [],
     roleManagement: [],
     userManagement: [],
     staff: [],
@@ -1075,6 +1169,24 @@ function isDateLikeColumn(column: string): boolean {
   )
 }
 
+function normalizeCrewCode(value: string): string {
+  return (value || "").trim().toUpperCase()
+}
+
+function addDaysToYmd(ymd: string, n: number): string {
+  const d = new Date(`${ymd}T00:00:00`)
+  d.setDate(d.getDate() + n)
+  return toYmd(d)
+}
+
+function overlapDaysInclusive(startA: string, endA: string, startB: string, endB: string): number {
+  if (!startA || !endA || !startB || !endB) return 0
+  const s = startA > startB ? startA : startB
+  const e = endA < endB ? endA : endB
+  if (e < s) return 0
+  return getDateRangeInclusive(s, e).length
+}
+
 function getDateRangeInclusive(fromDate: string, toDate: string): Date[] {
   const start = new Date(`${fromDate}T00:00:00`)
   const end = new Date(`${toDate}T00:00:00`)
@@ -1237,6 +1349,69 @@ export default function Page() {
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [staffLookupQuery, setStaffLookupQuery] = useState("")
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null)
+  const [crewDbSearch, setCrewDbSearch] = useState("")
+  const [crewLeavePolicyForm, setCrewLeavePolicyForm] = useState({
+    policyName: "",
+    crewType: "Captain",
+    workPatternDays: "90",
+    leavePatternDays: "30",
+    codeThresholdsJson: "{}",
+    activeStatus: "Active",
+  })
+  const [crewLeavePolicyThresholds, setCrewLeavePolicyThresholds] = useState<Record<string, string>>({})
+  const [crewLeaveAssignmentForm, setCrewLeaveAssignmentForm] = useState({
+    crewCode: "",
+    policyId: "",
+  })
+  const [crewLeaveMarkForm, setCrewLeaveMarkForm] = useState({
+    crewCode: "",
+    markType: "MC",
+    fromDate: toYmd(new Date()),
+    toDate: toYmd(new Date()),
+    reason: "",
+  })
+  const [crewLeaveGeneratorForm, setCrewLeaveGeneratorForm] = useState({
+    crewCode: "",
+    years: "2",
+    replaceExisting: "Yes",
+  })
+  const [crewLeavePlannerTab, setCrewLeavePlannerTab] = useState<
+    "rotationTypes" | "attendanceCodes" | "dailyAttendance" | "generator" | "blocks" | "timeline" | "conflicts"
+  >("rotationTypes")
+  const [isRotationModalOpen, setIsRotationModalOpen] = useState(false)
+  const [editingRotationId, setEditingRotationId] = useState<string | null>(null)
+  const [crewLeaveBlocksFilter, setCrewLeaveBlocksFilter] = useState({
+    crewCode: "",
+    fromDate: "",
+    toDate: "",
+  })
+  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState({
+    fromDate: toYmd(new Date()),
+    toDate: addDaysToYmd(toYmd(new Date()), 30),
+  })
+  const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
+    code: "MC",
+    name: "",
+    allowLeaveDeduction: "Yes",
+  })
+  // Conflict-detection config: max number of crew (of a given crewType) allowed
+  // to be on leave on the same day. "_default" applies when a specific crewType
+  // entry is missing.
+  const [crewLeaveConflictConfig, setCrewLeaveConflictConfig] = useState<{
+    thresholdsByType: Record<string, number>
+    defaultThreshold: number
+    fromDate: string
+    toDate: string
+    crewTypeFilter: string
+    severityFilter: "all" | "high" | "medium" | "low"
+  }>({
+    thresholdsByType: {},
+    defaultThreshold: 2,
+    fromDate: "",
+    toDate: "",
+    crewTypeFilter: "",
+    severityFilter: "all",
+  })
   const [isInactivePopupOpen, setIsInactivePopupOpen] = useState(false)
   const [inactivePopupStaffId, setInactivePopupStaffId] = useState<string | null>(null)
   const [inactivePopupFromEdit, setInactivePopupFromEdit] = useState(false)
@@ -1320,6 +1495,455 @@ export default function Page() {
     () => MODULES.find((m) => m.key === activeModule) ?? MODULES[0],
     [activeModule],
   )
+  const isCrewOperationBlankModule =
+    activeConfig.key === "crewRostering" ||
+    activeConfig.key === "crewLeavePlanner" ||
+    activeConfig.key === "crewTrainingPlan"
+  const filteredActiveRows = useMemo(() => {
+    if (activeConfig.key !== "crewDataBase") return store[activeConfig.key]
+    const q = normalizeText(crewDbSearch)
+    if (!q) return store.crewDataBase
+    return store.crewDataBase.filter((row) => {
+      const crewCode = normalizeText(row.crewCode || "")
+      const crewName = normalizeText(row.crewName || "")
+      const staffId = normalizeText(row.employeeNo || "")
+      return crewCode.includes(q) || crewName.includes(q) || staffId.includes(q)
+    })
+  }, [activeConfig.key, crewDbSearch, store])
+  const crewTypes = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          store.crewDataBase
+            .map((row) => (row.crewType || "").trim())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    [store.crewDataBase],
+  )
+  const crewLeavePolicies = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "policy",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewLeaveAssignments = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "assignment",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewLeaveMarks = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "mark",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewGeneratedBlocks = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "generatedblock",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewOpsCodeConfigs = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "codeconfig",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewOpsCodeAllowMap = useMemo(() => {
+    const map = new Map<string, boolean>()
+    crewOpsCodeConfigs.forEach((row) => {
+      const code = (row.code || "").trim().toUpperCase()
+      if (!code) return
+      map.set(code, (row.allowLeaveDeduction || "No") === "Yes")
+    })
+    return map
+  }, [crewOpsCodeConfigs])
+  const crewOpsDeductionCodes = useMemo(
+    () =>
+      crewOpsCodeConfigs
+        .filter((row) => (row.allowLeaveDeduction || "No") === "Yes")
+        .map((row) => ({
+          code: (row.code || "").trim().toUpperCase(),
+          name: (row.codeName || "").trim() || (row.code || "").trim().toUpperCase(),
+        }))
+        .filter((row) => Boolean(row.code)),
+    [crewOpsCodeConfigs],
+  )
+  const filteredCrewGeneratedBlocks = useMemo(() => {
+    return crewGeneratedBlocks.filter((b) => {
+      const crewCode = normalizeCrewCode(b.crewCode || "")
+      const startDate = (b.startDate || "").trim()
+      const endDate = (b.endDate || "").trim()
+      if (crewLeaveBlocksFilter.crewCode && crewCode !== crewLeaveBlocksFilter.crewCode) return false
+      if (crewLeaveBlocksFilter.fromDate && endDate < crewLeaveBlocksFilter.fromDate) return false
+      if (crewLeaveBlocksFilter.toDate && startDate > crewLeaveBlocksFilter.toDate) return false
+      return true
+    })
+  }, [crewGeneratedBlocks, crewLeaveBlocksFilter])
+  const crewLeaveTimelineView = useMemo(() => {
+    const fromDate = (crewLeaveTimelineFilter.fromDate || "").trim()
+    const toDate = (crewLeaveTimelineFilter.toDate || "").trim()
+    if (!fromDate || !toDate || toDate < fromDate) {
+      return {
+        dates: [] as string[],
+        totalDays: 0,
+        crewRows: [] as Array<{ crewCode: string; crewName: string; blocks: Entry[] }>,
+      }
+    }
+
+    const dates = getDateRangeInclusive(fromDate, toDate).map((d) => toYmd(d)).slice(0, 370)
+    const totalDays = dates.length
+    const blocksInWindow = crewGeneratedBlocks.filter((b) => {
+      const start = (b.startDate || "").trim()
+      const end = (b.endDate || "").trim()
+      if (!start || !end) return false
+      return overlapDaysInclusive(start, end, fromDate, toDate) > 0
+    })
+
+    const crewMap = new Map<string, { crewCode: string; crewName: string; blocks: Entry[] }>()
+    blocksInWindow.forEach((b) => {
+      const crewCode = normalizeCrewCode(b.crewCode || "")
+      if (!crewCode) return
+      if (!crewMap.has(crewCode)) {
+        crewMap.set(crewCode, {
+          crewCode,
+          crewName: (b.crewName || "").trim(),
+          blocks: [],
+        })
+      }
+      crewMap.get(crewCode)?.blocks.push(b)
+    })
+    const crewRows = Array.from(crewMap.values()).sort((a, b) => a.crewCode.localeCompare(b.crewCode))
+    return { dates, totalDays, crewRows }
+  }, [crewGeneratedBlocks, crewLeaveTimelineFilter])
+  const computedCrewGeneratedBlocks = useMemo(() => {
+    const byCrewCycle = new Map<string, { work?: Entry; leave?: Entry }>()
+    crewGeneratedBlocks.forEach((b) => {
+      const key = `${normalizeCrewCode(b.crewCode || "")}::${b.cycleNumber || ""}`
+      const slot = byCrewCycle.get(key) || {}
+      if ((b.blockType || "").toLowerCase() === "work") slot.work = b
+      if ((b.blockType || "").toLowerCase() === "leave") slot.leave = b
+      byCrewCycle.set(key, slot)
+    })
+
+    const marksByCrew = new Map<string, Entry[]>()
+    crewLeaveMarks.forEach((m) => {
+      const key = normalizeCrewCode(m.crewCode || "")
+      const arr = marksByCrew.get(key) || []
+      arr.push(m)
+      marksByCrew.set(key, arr)
+    })
+
+    const canDeduct = {
+      MC: crewOpsCodeAllowMap.get("MC") === true,
+      AB: crewOpsCodeAllowMap.get("AB") === true,
+      SD: crewOpsCodeAllowMap.get("SD") === true,
+    }
+
+    const out: Array<Entry & { actualDays?: string; deductionDays?: string; delta?: string }> = []
+    crewGeneratedBlocks.forEach((b) => {
+      if ((b.blockType || "").toLowerCase() !== "leave") {
+        out.push({ ...b, actualDays: b.plannedDays || "0", deductionDays: "0", delta: "0" })
+        return
+      }
+      const crewCode = normalizeCrewCode(b.crewCode || "")
+      const cycle = b.cycleNumber || ""
+      const key = `${crewCode}::${cycle}`
+      const pair = byCrewCycle.get(key)
+      const cycleStart = (pair?.work?.startDate || b.startDate || "").trim()
+      const cycleEnd = (b.endDate || "").trim()
+      const marks = (marksByCrew.get(crewCode) || []).filter((m) => {
+        const from = (m.fromDate || "").trim()
+        const to = (m.toDate || "").trim() || from
+        return overlapDaysInclusive(from, to, cycleStart, cycleEnd) > 0
+      })
+      let thresholds: Record<string, string> = {}
+      try {
+        thresholds = JSON.parse(b.codeThresholdsJson || "{}") as Record<string, string>
+      } catch {
+        thresholds = {}
+      }
+      const marksByCode = new Map<string, number>()
+      marks.forEach((m) => {
+        const code = (m.markType || "").trim().toUpperCase()
+        if (!code) return
+        const from = (m.fromDate || "").trim()
+        const to = (m.toDate || "").trim() || from
+        const days = overlapDaysInclusive(from, to, cycleStart, cycleEnd)
+        marksByCode.set(code, (marksByCode.get(code) || 0) + days)
+      })
+      let deduction = 0
+      Object.entries(thresholds).forEach(([code, thresholdVal]) => {
+        const total = marksByCode.get(code) || 0
+        const threshold = Number(thresholdVal || "0") || 0
+        const enabled =
+          code === "MC"
+            ? canDeduct.MC
+            : code === "AB"
+              ? canDeduct.AB
+              : code === "SD"
+                ? canDeduct.SD
+                : crewOpsCodeAllowMap.get(code) === true
+        if (!enabled) return
+        deduction += Math.max(total - threshold, 0)
+      })
+      const planned = Number(b.plannedDays || "0") || 0
+      const actual = Math.max(planned - deduction, 0)
+      out.push({
+        ...b,
+        actualDays: String(actual),
+        deductionDays: String(deduction),
+        delta: String(actual - planned),
+      })
+    })
+    return out
+  }, [crewGeneratedBlocks, crewLeaveMarks, crewOpsCodeAllowMap])
+
+  // Conflict / overlap detection for the Crew Leave Planner.
+  // Detects:
+  //   1. Self-overlap   — same crew has two LEAVE blocks that overlap.
+  //   2. Coverage       — too many crew of the same crewType on LEAVE on the same day
+  //                       (threshold configurable per type, falls back to default).
+  //   3. OutOfWindow    — leave block falls outside crew's joiningDate / releaseDate.
+  const crewLeaveConflicts = useMemo(() => {
+    type Conflict = {
+      id: string
+      type: "Overlap" | "Coverage" | "OutOfWindow"
+      severity: "high" | "medium" | "low"
+      crewCode: string
+      crewName: string
+      crewType: string
+      startDate: string
+      endDate: string
+      message: string
+    }
+    const conflicts: Conflict[] = []
+
+    // Only LEAVE blocks matter for conflict checks.
+    const leaveBlocks = crewGeneratedBlocks
+      .filter((b) => (b.blockType || "").toLowerCase() === "leave")
+      .filter((b) => {
+        const s = (b.startDate || "").trim()
+        const e = (b.endDate || "").trim()
+        if (!s || !e) return false
+        if (crewLeaveConflictConfig.fromDate && e < crewLeaveConflictConfig.fromDate) return false
+        if (crewLeaveConflictConfig.toDate && s > crewLeaveConflictConfig.toDate) return false
+        if (
+          crewLeaveConflictConfig.crewTypeFilter &&
+          (b.crewType || "").trim() !== crewLeaveConflictConfig.crewTypeFilter
+        )
+          return false
+        return true
+      })
+
+    // 1. Self-overlap detection: group leave blocks by crewCode and compare pairs.
+    const byCrew = new Map<string, Entry[]>()
+    for (const b of leaveBlocks) {
+      const key = normalizeCrewCode(b.crewCode || "")
+      if (!key) continue
+      const list = byCrew.get(key) || []
+      list.push(b)
+      byCrew.set(key, list)
+    }
+    for (const [crewCode, list] of byCrew.entries()) {
+      const sorted = [...list].sort((a, b) =>
+        (a.startDate || "").localeCompare(b.startDate || ""),
+      )
+      for (let i = 1; i < sorted.length; i += 1) {
+        const prev = sorted[i - 1]
+        const curr = sorted[i]
+        if ((curr.startDate || "") <= (prev.endDate || "")) {
+          conflicts.push({
+            id: `ovl_${prev.id}_${curr.id}`,
+            type: "Overlap",
+            severity: "high",
+            crewCode,
+            crewName: prev.crewName || curr.crewName || "",
+            crewType: prev.crewType || curr.crewType || "",
+            startDate: curr.startDate || "",
+            endDate:
+              (prev.endDate || "") > (curr.endDate || "")
+                ? prev.endDate || ""
+                : curr.endDate || "",
+            message: `Overlapping leave blocks: ${prev.startDate}–${prev.endDate} and ${curr.startDate}–${curr.endDate}`,
+          })
+        }
+      }
+    }
+
+    // 2. Coverage threshold: per crewType, count concurrent leaves per day.
+    //    Build per-type, per-day counts and emit one conflict per (type, day) over threshold.
+    const perTypePerDay = new Map<string, Map<string, Set<string>>>()
+    for (const b of leaveBlocks) {
+      const crewType = (b.crewType || "").trim() || "Unknown"
+      const start = b.startDate || ""
+      const end = b.endDate || ""
+      if (!start || !end || start > end) continue
+      // Cap any single block at 400 day-stamps to avoid runaway loops on bad data.
+      let day = start
+      let guard = 0
+      const dayMap = perTypePerDay.get(crewType) || new Map<string, Set<string>>()
+      perTypePerDay.set(crewType, dayMap)
+      while (day <= end && guard < 400) {
+        const set = dayMap.get(day) || new Set<string>()
+        set.add(normalizeCrewCode(b.crewCode || ""))
+        dayMap.set(day, set)
+        day = addDaysToYmd(day, 1)
+        guard += 1
+      }
+    }
+    const defaultThreshold = Math.max(0, crewLeaveConflictConfig.defaultThreshold)
+    for (const [crewType, dayMap] of perTypePerDay.entries()) {
+      const threshold =
+        crewLeaveConflictConfig.thresholdsByType[crewType] !== undefined
+          ? Math.max(0, crewLeaveConflictConfig.thresholdsByType[crewType])
+          : defaultThreshold
+      // Collapse consecutive over-threshold days into ranges for readability.
+      const sortedDays = Array.from(dayMap.keys()).sort()
+      let rangeStart: string | null = null
+      let rangeEnd: string | null = null
+      let rangeCrewSet = new Set<string>()
+      let rangeMaxCount = 0
+      const flushRange = () => {
+        if (!rangeStart || !rangeEnd) return
+        const over = rangeMaxCount - threshold
+        const severity: Conflict["severity"] =
+          over >= 2 ? "high" : over === 1 ? "medium" : "low"
+        conflicts.push({
+          id: `cov_${crewType}_${rangeStart}_${rangeEnd}`,
+          type: "Coverage",
+          severity,
+          crewCode: Array.from(rangeCrewSet).filter(Boolean).join(", ") || "-",
+          crewName: "(multiple)",
+          crewType,
+          startDate: rangeStart,
+          endDate: rangeEnd,
+          message: `${rangeMaxCount} ${crewType} on leave (limit ${threshold})${
+            rangeStart === rangeEnd ? "" : ` across ${rangeStart}–${rangeEnd}`
+          }`,
+        })
+      }
+      for (const day of sortedDays) {
+        const crewSet = dayMap.get(day) || new Set<string>()
+        const count = crewSet.size
+        if (count > threshold) {
+          if (rangeStart && rangeEnd && addDaysToYmd(rangeEnd, 1) === day) {
+            rangeEnd = day
+            for (const c of crewSet) rangeCrewSet.add(c)
+            if (count > rangeMaxCount) rangeMaxCount = count
+          } else {
+            flushRange()
+            rangeStart = day
+            rangeEnd = day
+            rangeCrewSet = new Set<string>(crewSet)
+            rangeMaxCount = count
+          }
+        }
+      }
+      flushRange()
+    }
+
+    // 3. Out-of-window: leave outside crew's joining/release dates.
+    const crewByCode = new Map<string, Entry>()
+    for (const c of store.crewDataBase) {
+      crewByCode.set(normalizeCrewCode(c.crewCode || ""), c)
+    }
+    for (const b of leaveBlocks) {
+      const crew = crewByCode.get(normalizeCrewCode(b.crewCode || ""))
+      if (!crew) continue
+      const joining = (crew.joiningDate || "").trim()
+      const release = (crew.releaseDate || "").trim()
+      const start = (b.startDate || "").trim()
+      const end = (b.endDate || "").trim()
+      if (joining && start && start < joining) {
+        conflicts.push({
+          id: `oow_pre_${b.id}`,
+          type: "OutOfWindow",
+          severity: "medium",
+          crewCode: normalizeCrewCode(b.crewCode || ""),
+          crewName: b.crewName || crew.crewName || "",
+          crewType: b.crewType || crew.crewType || "",
+          startDate: start,
+          endDate: end,
+          message: `Leave starts ${start} before joining date ${joining}`,
+        })
+      }
+      if (release && end && end > release) {
+        conflicts.push({
+          id: `oow_post_${b.id}`,
+          type: "OutOfWindow",
+          severity: "medium",
+          crewCode: normalizeCrewCode(b.crewCode || ""),
+          crewName: b.crewName || crew.crewName || "",
+          crewType: b.crewType || crew.crewType || "",
+          startDate: start,
+          endDate: end,
+          message: `Leave ends ${end} after release date ${release}`,
+        })
+      }
+    }
+
+    // Apply severity filter last.
+    const sevFilter = crewLeaveConflictConfig.severityFilter
+    const filtered =
+      sevFilter === "all" ? conflicts : conflicts.filter((c) => c.severity === sevFilter)
+
+    // Sort by severity then by start date.
+    const sevRank: Record<Conflict["severity"], number> = { high: 0, medium: 1, low: 2 }
+    filtered.sort((a, b) => {
+      if (sevRank[a.severity] !== sevRank[b.severity]) return sevRank[a.severity] - sevRank[b.severity]
+      return (a.startDate || "").localeCompare(b.startDate || "")
+    })
+    return filtered
+  }, [crewGeneratedBlocks, store.crewDataBase, crewLeaveConflictConfig])
+
+  const crewLeaveConflictsCountsBySeverity = useMemo(() => {
+    const counts = { high: 0, medium: 0, low: 0 }
+    for (const c of crewLeaveConflicts) counts[c.severity] += 1
+    return counts
+  }, [crewLeaveConflicts])
+  const rotationQuickPresets = [
+    { work: 73, leave: 19 },
+    { work: 72, leave: 19 },
+    { work: 72, leave: 18 },
+    { work: 75, leave: 15 },
+    { work: 73, leave: 18 },
+    { work: 60, leave: 13 },
+    { work: 58, leave: 15 },
+    { work: 60, leave: 15 },
+    { work: 45, leave: 10 },
+    { work: 50, leave: 10 },
+    { work: 30, leave: 7 },
+    { work: 21, leave: 7 },
+  ]
+  const rotationYearPreview = useMemo(() => {
+    const work = Number(crewLeavePolicyForm.workPatternDays || "0")
+    const leave = Number(crewLeavePolicyForm.leavePatternDays || "0")
+    const cycle = work + leave
+    if (!Number.isFinite(work) || !Number.isFinite(leave) || cycle <= 0) return null
+    const cyclesPerYear = 365 / cycle
+    const nearest = Math.round(cyclesPerYear)
+    const covered = nearest * cycle
+    const diff = covered - 365
+    return {
+      work,
+      leave,
+      cycle,
+      cyclesPerYear,
+      nearest,
+      covered,
+      diff,
+      leavePerYear: leave * cyclesPerYear,
+      leaveShare: (leave / cycle) * 100,
+    }
+  }, [crewLeavePolicyForm.workPatternDays, crewLeavePolicyForm.leavePatternDays])
 
   const [forms, setForms] = useState<Record<ModuleKey, Record<string, string>>>(() => {
     return MODULES.reduce((acc, module) => {
@@ -1466,6 +2090,33 @@ export default function Page() {
       setAuthStaffId(savedAuthStaffId)
     }
     setIsAuthReady(true)
+  }, [hydrated])
+
+  // First-run bootstrap: seed a default admin user when none exist so the
+  // operator can log in. Credentials: username "admin" / password "admin".
+  // Runs once after hydration; no-op if any user already exists.
+  useEffect(() => {
+    if (!hydrated) return
+    if (store.userManagement.length > 0) return
+    const adminEntry: Entry = {
+      id: `usr_admin_${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      userType: "Dispatch Staff User",
+      dispatchStaff: "",
+      fullName: "Default Administrator",
+      userName: "admin",
+      email: "",
+      password: "admin",
+      roleName: "Administrator",
+      status: "Active",
+    }
+    setStore((prev) =>
+      prev.userManagement.length > 0
+        ? prev
+        : { ...prev, userManagement: [adminEntry] },
+    )
+    // Only run when userManagement transitions to empty after hydration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated])
 
   const dashboardStats = useMemo(() => {
@@ -3607,11 +4258,11 @@ export default function Page() {
     }
 
     if (
-      activeConfig.key === "staff" &&
+      (activeConfig.key === "staff" || activeConfig.key === "crewDataBase") &&
       resolvedForm.activeStatus === "Inactive" &&
       (!resolvedForm.inactiveDate?.trim() || !resolvedForm.inactiveReason?.trim())
     ) {
-      window.alert('Please provide "Inactive Date" and "Inactive Reason" for inactive staff.')
+      window.alert('Please provide "Inactive Date" and "Inactive Reason" for inactive record.')
       return
     }
 
@@ -3667,6 +4318,47 @@ export default function Page() {
           : [staffEntry, ...prev[activeConfig.key]],
       }))
 
+      setForms((prev) => ({
+        ...prev,
+        [activeConfig.key]: buildEmptyForm(activeConfig),
+      }))
+      setStaffLookupQuery("")
+      setEditingEntryId(null)
+      setIsFormOpen(false)
+      return
+    }
+
+    if (activeConfig.key === "crewDataBase") {
+      const crewCode = normalizeCrewCode(resolvedForm.crewCode || "")
+      const crewName = (resolvedForm.crewName || "").trim()
+      if (!/^[A-Z]{4}$/.test(crewCode)) {
+        window.alert('Crew Code must be exactly 4 letters (A-Z).')
+        return
+      }
+      if (!crewName) {
+        window.alert("Please enter Crew Name.")
+        return
+      }
+      const duplicate = store.crewDataBase.find(
+        (row) => normalizeCrewCode(row.crewCode || "") === crewCode && row.id !== editingEntryId,
+      )
+      if (duplicate) {
+        window.alert(`Crew Code "${crewCode}" already exists.`)
+        return
+      }
+      const crewEntry: Entry = {
+        id: editingEntryId ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        createdAt: new Date().toISOString(),
+        ...resolvedForm,
+        crewCode,
+        crewName,
+      }
+      setStore((prev) => ({
+        ...prev,
+        crewDataBase: editingEntryId
+          ? prev.crewDataBase.map((item) => (item.id === editingEntryId ? crewEntry : item))
+          : [crewEntry, ...prev.crewDataBase],
+      }))
       setForms((prev) => ({
         ...prev,
         [activeConfig.key]: buildEmptyForm(activeConfig),
@@ -4081,11 +4773,416 @@ export default function Page() {
   }, [store.roleManagement])
 
   const removeEntry = (moduleKey: ModuleKey, entryId: string) => {
+    if (!window.confirm("Are you sure you want to delete this record?")) return
     setStore((prev) => ({
       ...prev,
       [moduleKey]: prev[moduleKey].filter((entry) => entry.id !== entryId),
     }))
   }
+
+  const saveCrewLeavePolicy = () => {
+    const policyName = (crewLeavePolicyForm.policyName || "").trim()
+    const crewType = (crewLeavePolicyForm.crewType || "").trim()
+    const workPatternDays = Number(crewLeavePolicyForm.workPatternDays || "0")
+    const leavePatternDays = Number(crewLeavePolicyForm.leavePatternDays || "0")
+    const thresholds: Record<string, string> = {}
+    Object.entries(crewLeavePolicyThresholds).forEach(([code, value]) => {
+      const n = Math.max(Number(value || "0"), 0)
+      if (!Number.isFinite(n)) return
+      thresholds[code] = String(n)
+    })
+    if (!policyName || !crewType) {
+      window.alert("Policy Name and Crew Type are required.")
+      return
+    }
+    if (!Number.isFinite(workPatternDays) || workPatternDays <= 0) {
+      window.alert("Work Pattern Days must be greater than 0.")
+      return
+    }
+    if (!Number.isFinite(leavePatternDays) || leavePatternDays <= 0) {
+      window.alert("Leave Pattern Days must be greater than 0.")
+      return
+    }
+    const entry: Entry = {
+      id: editingRotationId ?? `clp_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      recordType: "policy",
+      policyName,
+      crewType,
+      workPatternDays: String(workPatternDays),
+      leavePatternDays: String(leavePatternDays),
+      codeThresholdsJson: JSON.stringify(thresholds),
+      activeStatus: crewLeavePolicyForm.activeStatus || "Active",
+    }
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: editingRotationId
+        ? prev.crewLeavePlanner.map((row) => (row.id === editingRotationId ? entry : row))
+        : [entry, ...prev.crewLeavePlanner],
+    }))
+    setCrewLeavePolicyForm((prev) => ({ ...prev, policyName: "" }))
+    setEditingRotationId(null)
+  }
+
+  const editCrewLeavePolicy = (policyId: string) => {
+    const p = crewLeavePolicies.find((row) => row.id === policyId)
+    if (!p) return
+    setCrewLeavePolicyForm({
+      policyName: p.policyName || "",
+      crewType: p.crewType || "Captain",
+      workPatternDays: p.workPatternDays || "90",
+      leavePatternDays: p.leavePatternDays || "30",
+      codeThresholdsJson: p.codeThresholdsJson || "{}",
+      activeStatus: p.activeStatus || "Active",
+    })
+    try {
+      const parsed = JSON.parse(p.codeThresholdsJson || "{}") as Record<string, string>
+      setCrewLeavePolicyThresholds(parsed || {})
+    } catch {
+      setCrewLeavePolicyThresholds({})
+    }
+    setEditingRotationId(p.id)
+    setIsRotationModalOpen(true)
+  }
+
+  const deleteCrewLeavePolicy = (policyId: string) => {
+    if (!window.confirm("Delete this rotation type?")) return
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== policyId),
+    }))
+  }
+
+  const assignCrewLeavePolicy = () => {
+    const crewCode = normalizeCrewCode(crewLeaveAssignmentForm.crewCode || "")
+    const policyId = (crewLeaveAssignmentForm.policyId || "").trim()
+    if (!crewCode || !policyId) {
+      window.alert("Crew Code and Policy are required.")
+      return
+    }
+    const policy = crewLeavePolicies.find((p) => p.id === policyId)
+    if (!policy) {
+      window.alert("Selected policy was not found.")
+      return
+    }
+    const crew = store.crewDataBase.find((c) => normalizeCrewCode(c.crewCode || "") === crewCode)
+    if (!crew) {
+      window.alert("Selected crew was not found in Crew Data Base.")
+      return
+    }
+    if ((crew.crewType || "").trim() !== (policy.crewType || "").trim()) {
+      window.alert("Selected policy is not eligible for this crew type.")
+      return
+    }
+
+    const entry: Entry = {
+      id: `cla_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      recordType: "assignment",
+      crewCode,
+      policyId,
+      policyName: policy.policyName || "",
+      crewType: crew.crewType || "",
+    }
+    setStore((prev) => {
+      const kept = prev.crewLeavePlanner.filter(
+        (row) =>
+          !(
+            (row.recordType || "").trim().toLowerCase() === "assignment" &&
+            normalizeCrewCode(row.crewCode || "") === crewCode
+          ),
+      )
+      return { ...prev, crewLeavePlanner: [entry, ...kept] }
+    })
+    setCrewLeaveAssignmentForm({ crewCode: "", policyId: "" })
+  }
+
+  const addCrewLeaveMark = () => {
+    const crewCode = normalizeCrewCode(crewLeaveMarkForm.crewCode || "")
+    const markType = (crewLeaveMarkForm.markType || "").trim().toUpperCase()
+    const fromDate = (crewLeaveMarkForm.fromDate || "").trim()
+    const toDate = (crewLeaveMarkForm.toDate || "").trim() || fromDate
+    if (!crewCode || !markType || !fromDate || !toDate) {
+      window.alert("Crew Code, Mark Type, From Date and To Date are required.")
+      return
+    }
+    if (toDate < fromDate) {
+      window.alert('"To Date" must be after or equal to "From Date".')
+      return
+    }
+    if (!["MC", "AB", "SD"].includes(markType)) {
+      window.alert("Mark Type must be MC, AB or SD.")
+      return
+    }
+    const noOfDays = getDateRangeInclusive(fromDate, toDate).length
+    const crew = store.crewDataBase.find((c) => normalizeCrewCode(c.crewCode || "") === crewCode)
+    if (!crew) {
+      window.alert("Selected crew was not found.")
+      return
+    }
+    const entry: Entry = {
+      id: `clm_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      recordType: "mark",
+      crewCode,
+      crewName: crew.crewName || "",
+      crewType: crew.crewType || "",
+      markType,
+      noOfDays: String(noOfDays),
+      fromDate,
+      toDate,
+      reason: (crewLeaveMarkForm.reason || "").trim(),
+    }
+    setStore((prev) => ({ ...prev, crewLeavePlanner: [entry, ...prev.crewLeavePlanner] }))
+    setCrewLeaveMarkForm((prev) => ({ ...prev, reason: "" }))
+  }
+
+  const setCrewOpsCodeDeduction = (code: "MC" | "AB" | "SD", allowed: boolean) => {
+    setStore((prev) => {
+      const existing = prev.crewLeavePlanner.find(
+        (row) =>
+          (row.recordType || "").trim().toLowerCase() === "codeconfig" &&
+          (row.code || "").trim().toUpperCase() === code,
+      )
+      const entry: Entry = {
+        id: existing?.id || `clc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        recordType: "codeConfig",
+        code,
+        allowLeaveDeduction: allowed ? "Yes" : "No",
+      }
+      const next = existing
+        ? prev.crewLeavePlanner.map((row) => (row.id === existing.id ? entry : row))
+        : [entry, ...prev.crewLeavePlanner]
+      return { ...prev, crewLeavePlanner: next }
+    })
+  }
+
+  const saveCrewOpsCode = () => {
+    const code = (crewOpsCodeForm.code || "").trim().toUpperCase()
+    const name = (crewOpsCodeForm.name || "").trim()
+    if (!code) {
+      window.alert("Code is required.")
+      return
+    }
+    if (!name) {
+      window.alert("Code name is required.")
+      return
+    }
+    setStore((prev) => {
+      const existing = prev.crewLeavePlanner.find(
+        (row) =>
+          (row.recordType || "").trim().toLowerCase() === "codeconfig" &&
+          (row.code || "").trim().toUpperCase() === code,
+      )
+      const entry: Entry = {
+        id: existing?.id || `clc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        recordType: "codeConfig",
+        code,
+        codeName: name,
+        allowLeaveDeduction: crewOpsCodeForm.allowLeaveDeduction === "Yes" ? "Yes" : "No",
+      }
+      const next = existing
+        ? prev.crewLeavePlanner.map((row) => (row.id === existing.id ? entry : row))
+        : [entry, ...prev.crewLeavePlanner]
+      return { ...prev, crewLeavePlanner: next }
+    })
+    setCrewOpsCodeForm({ code: "MC", name: "", allowLeaveDeduction: "Yes" })
+  }
+
+  const editCrewOpsCode = (id: string) => {
+    const row = crewOpsCodeConfigs.find((x) => x.id === id)
+    if (!row) return
+    setCrewOpsCodeForm({
+      code: (row.code || "").trim().toUpperCase() || "MC",
+      name: row.codeName || "",
+      allowLeaveDeduction: (row.allowLeaveDeduction || "No") === "Yes" ? "Yes" : "No",
+    })
+  }
+
+  const deleteCrewOpsCode = (id: string) => {
+    if (!window.confirm("Delete this attendance code?")) return
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== id),
+    }))
+  }
+
+  const generateCrewLeaveBlocks = () => {
+    const selectedCrewCode = normalizeCrewCode(
+      crewLeaveAssignmentForm.crewCode || crewLeaveGeneratorForm.crewCode || "",
+    )
+    if (!selectedCrewCode) {
+      window.alert("Please select a crew member.")
+      return
+    }
+    const years = Number(crewLeaveGeneratorForm.years || "0")
+    if (!Number.isFinite(years) || years <= 0 || years > 10) {
+      window.alert("Years must be between 1 and 10.")
+      return
+    }
+    const targetCrew = store.crewDataBase.filter(
+      (c) => normalizeCrewCode(c.crewCode || "") === selectedCrewCode,
+    )
+    if (targetCrew.length === 0) {
+      window.alert("No crew found for generation.")
+      return
+    }
+
+    const policyById = new Map<string, Entry>()
+    crewLeavePolicies.forEach((p) => policyById.set(p.id, p))
+    const assignmentByCrewCode = new Map<string, Entry>()
+    crewLeaveAssignments.forEach((a) => assignmentByCrewCode.set(normalizeCrewCode(a.crewCode || ""), a))
+    const selectedPolicyId = (crewLeaveAssignmentForm.policyId || "").trim()
+    const selectedPolicy = selectedPolicyId ? policyById.get(selectedPolicyId) : undefined
+    const replaceExisting = crewLeaveGeneratorForm.replaceExisting === "Yes"
+
+    const generated: Entry[] = []
+    let skippedNoRelease = 0
+    let skippedNoPolicy = 0
+    targetCrew.forEach((crew) => {
+      const crewCode = normalizeCrewCode(crew.crewCode || "")
+      const crewName = (crew.crewName || "").trim()
+      const crewType = (crew.crewType || "").trim()
+      const releaseDate = (crew.releaseDate || "").trim()
+      if (!releaseDate) {
+        skippedNoRelease += 1
+        return
+      }
+      const assignment = assignmentByCrewCode.get(crewCode)
+      const policy =
+        selectedPolicy ||
+        (assignment?.policyId ? policyById.get(assignment.policyId) : undefined) ||
+        crewLeavePolicies.find(
+          (p) =>
+            (p.activeStatus || "").trim() === "Active" &&
+            (p.crewType || "").trim() === crewType,
+        )
+      if (selectedPolicy && (selectedPolicy.crewType || "").trim() !== crewType) {
+        skippedNoPolicy += 1
+        return
+      }
+      const workDays = Number(policy?.workPatternDays || "0")
+      const leaveDays = Number(policy?.leavePatternDays || "0")
+      if (!policy || !Number.isFinite(workDays) || !Number.isFinite(leaveDays) || workDays <= 0 || leaveDays <= 0) {
+        skippedNoPolicy += 1
+        return
+      }
+      const horizonEnd = addDaysToYmd(releaseDate, Math.round(years * 365))
+      let cursor = releaseDate
+      let cycle = 1
+      while (cursor < horizonEnd) {
+        const workStart = cursor
+        const workEnd = addDaysToYmd(workStart, workDays - 1)
+        generated.push({
+          id: `clb_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+          createdAt: new Date().toISOString(),
+          recordType: "generatedBlock",
+          crewCode,
+          crewName,
+          crewType,
+          policyId: policy.id,
+          policyName: policy.policyName || "",
+          cycleNumber: String(cycle),
+          blockType: "work",
+          startDate: workStart,
+          endDate: workEnd,
+          plannedDays: String(workDays),
+        })
+        const leaveStart = addDaysToYmd(workEnd, 1)
+        const leaveEnd = addDaysToYmd(leaveStart, leaveDays - 1)
+        generated.push({
+          id: `clb_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+          createdAt: new Date().toISOString(),
+          recordType: "generatedBlock",
+          crewCode,
+          crewName,
+          crewType,
+          policyId: policy.id,
+          policyName: policy.policyName || "",
+          cycleNumber: String(cycle),
+          blockType: "leave",
+          startDate: leaveStart,
+          endDate: leaveEnd,
+          plannedDays: String(leaveDays),
+        })
+        cursor = addDaysToYmd(leaveEnd, 1)
+        cycle += 1
+      }
+    })
+
+    setStore((prev) => {
+      const kept = replaceExisting
+        ? prev.crewLeavePlanner.filter((row) => {
+            if ((row.recordType || "").trim().toLowerCase() !== "generatedblock") return true
+            if (!selectedCrewCode) return false
+            return normalizeCrewCode(row.crewCode || "") !== selectedCrewCode
+          })
+        : prev.crewLeavePlanner
+      return { ...prev, crewLeavePlanner: [...generated, ...kept] }
+    })
+
+    window.alert(
+      `Generated ${generated.length} block(s).` +
+        (skippedNoRelease > 0 ? `\nSkipped ${skippedNoRelease} crew (no Release Date).` : "") +
+        (skippedNoPolicy > 0 ? `\nSkipped ${skippedNoPolicy} crew (no eligible active policy).` : ""),
+    )
+  }
+
+  const crewLeaveBalances = useMemo(() => {
+    const policyById = new Map<string, Entry>()
+    crewLeavePolicies.forEach((p) => policyById.set(p.id, p))
+    const assignmentByCrewCode = new Map<string, Entry>()
+    crewLeaveAssignments.forEach((a) => assignmentByCrewCode.set(normalizeCrewCode(a.crewCode || ""), a))
+    const marksByCrewCode = new Map<string, Entry[]>()
+    crewLeaveMarks.forEach((m) => {
+      const code = normalizeCrewCode(m.crewCode || "")
+      const arr = marksByCrewCode.get(code) || []
+      arr.push(m)
+      marksByCrewCode.set(code, arr)
+    })
+
+    return store.crewDataBase.map((crew) => {
+      const crewCode = normalizeCrewCode(crew.crewCode || "")
+      const crewType = (crew.crewType || "").trim()
+      const releaseDate = (crew.releaseDate || "").trim()
+      const assignment = assignmentByCrewCode.get(crewCode)
+      const policy =
+        (assignment?.policyId ? policyById.get(assignment.policyId) : undefined) ||
+        crewLeavePolicies.find(
+          (p) =>
+            (p.activeStatus || "").trim() === "Active" &&
+            (p.crewType || "").trim() === crewType,
+        )
+      const workRotation = Number(policy?.workPatternDays || "0")
+      const leaveRotation = Number(policy?.leavePatternDays || "0")
+      const cycleDays = workRotation + leaveRotation
+      const deductions = (marksByCrewCode.get(crewCode) || []).reduce((acc, mark) => {
+        const d = Number(mark.noOfDays || "0")
+        return acc + (Number.isFinite(d) ? d : 0)
+      }, 0)
+      const leaveBalance = Math.max(leaveRotation - deductions, 0)
+      const renewalDate =
+        releaseDate && cycleDays > 0
+          ? toYmd(new Date(new Date(`${releaseDate}T00:00:00`).getTime() + cycleDays * 24 * 60 * 60 * 1000))
+          : ""
+      return {
+        id: `bal_${crew.id}`,
+        crewCode,
+        crewName: crew.crewName || "",
+        staffId: crew.employeeNo || "",
+        crewType,
+        releaseDate,
+        policyName: policy?.policyName || "-",
+        workRotation: workRotation > 0 ? String(workRotation) : "-",
+        leaveRotation: leaveRotation > 0 ? String(leaveRotation) : "-",
+        leaveDeduction: String(deductions),
+        leaveBalance: String(leaveBalance),
+        renewalDate: renewalDate || "-",
+      }
+    })
+  }, [crewLeaveAssignments, crewLeaveMarks, crewLeavePolicies, store.crewDataBase])
 
   const editEntry = (moduleKey: ModuleKey, entry: Entry) => {
     const config = MODULES.find((item) => item.key === moduleKey)
@@ -4347,6 +5444,104 @@ export default function Page() {
     link.click()
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
+  }
+
+  const importCrewDatabaseCsv = async (file: File) => {
+    const text = await file.text()
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    if (lines.length < 2) {
+      window.alert("CSV file is empty.")
+      return
+    }
+
+    const header = parseCsvLine(lines[0]).map((h) => normalizeText(h))
+    const indexCrewCode = header.findIndex((h) => h === normalizeText("Crew Code"))
+    const indexCrewName = header.findIndex((h) => h === normalizeText("Crew Name"))
+    const indexCrewType = header.findIndex((h) => h === normalizeText("Crew Type"))
+    const indexCrewCategory = header.findIndex((h) => h === normalizeText("Crew Category"))
+    const indexJoiningDate = header.findIndex((h) => h === normalizeText("Joining Date"))
+    const indexEmailId = header.findIndex((h) => h === normalizeText("Email ID"))
+    const indexMobileNo = header.findIndex((h) => h === normalizeText("Mobile No"))
+    const indexEmployeeNo = header.findIndex((h) => h === normalizeText("Employee No"))
+    const indexGender = header.findIndex((h) => h === normalizeText("Gender"))
+
+    if (indexCrewCode < 0 || indexCrewName < 0) {
+      window.alert('Invalid CSV header. Required columns: "Crew Code, Crew Name".')
+      return
+    }
+
+    const parsed: Entry[] = []
+    const errors: string[] = []
+    const seenCodes = new Set<string>()
+    for (let i = 1; i < lines.length; i++) {
+      const cells = parseCsvLine(lines[i])
+      const crewCode = normalizeCrewCode(cells[indexCrewCode] || "")
+      const crewName = (cells[indexCrewName] || "").trim()
+      if (!crewCode || !crewName) {
+        errors.push(`Row ${i + 1}: missing Crew Code or Crew Name.`)
+        continue
+      }
+      if (!/^[A-Z]{4}$/.test(crewCode)) {
+        errors.push(`Row ${i + 1}: Crew Code must be exactly 4 letters.`)
+        continue
+      }
+      if (seenCodes.has(crewCode)) {
+        errors.push(`Row ${i + 1}: duplicate Crew Code "${crewCode}" in CSV.`)
+        continue
+      }
+      seenCodes.add(crewCode)
+      const joiningDate = normalizeImportDate(cells[indexJoiningDate] || "")
+      const genderRaw = (cells[indexGender] || "").trim().toUpperCase()
+      const gender = genderRaw === "M" || genderRaw === "F" ? genderRaw : ""
+
+      parsed.push({
+        id: `crew_${Date.now()}_${i}_${Math.random().toString(16).slice(2, 6)}`,
+        createdAt: new Date().toISOString(),
+        crewCode,
+        crewName,
+        crewType: (cells[indexCrewType] || "").trim(),
+        crewCategory: (cells[indexCrewCategory] || "").trim(),
+        joiningDate,
+        emailId: (cells[indexEmailId] || "").trim(),
+        mobileNo: (cells[indexMobileNo] || "").trim(),
+        employeeNo: (cells[indexEmployeeNo] || "").trim(),
+        gender,
+        activeStatus: "Active",
+        inactiveDate: "",
+        inactiveReason: "",
+      })
+    }
+
+    if (parsed.length === 0) {
+      window.alert(errors.length > 0 ? errors.slice(0, 5).join("\n") : "No valid rows found.")
+      return
+    }
+
+    setStore((prev) => {
+      const byCode = new Map<string, Entry>()
+      prev.crewDataBase.forEach((row) => {
+        const key = normalizeCrewCode(row.crewCode || "")
+        if (key) byCode.set(key, row)
+      })
+      parsed.forEach((row) => {
+        const key = normalizeCrewCode(row.crewCode || "")
+        const existing = byCode.get(key)
+        byCode.set(key, {
+          ...(existing || {}),
+          ...row,
+          id: existing?.id || row.id,
+          createdAt: existing?.createdAt || row.createdAt,
+        })
+      })
+      return { ...prev, crewDataBase: Array.from(byCode.values()) }
+    })
+
+    const errorText =
+      errors.length > 0 ? `\n\nSkipped ${errors.length} row(s):\n${errors.slice(0, 5).join("\n")}` : ""
+    window.alert(`Crew DB updated. Imported/updated ${parsed.length} row(s).${errorText}`)
   }
 
   const importPublicHolidayCsv = async (file: File) => {
@@ -6905,6 +8100,1080 @@ export default function Page() {
                       }))
                     }
                   />
+                ) : activeConfig.key === "crewLeavePlanner" ? (
+                  <div className="d-flex flex-column gap-3">
+                    <ul className="nav nav-tabs">
+                      {[
+                        { key: "rotationTypes", label: "Rotation Types" },
+                        { key: "attendanceCodes", label: "Attendance Codes" },
+                        { key: "dailyAttendance", label: "Daily Attendance Record" },
+                        { key: "generator", label: "Generator" },
+                        { key: "blocks", label: "Blocks (Planned vs Actual)" },
+                        { key: "timeline", label: "Daily Ops Timeline" },
+                        { key: "conflicts", label: "Conflicts" },
+                      ].map((tab) => {
+                        const isConflicts = tab.key === "conflicts"
+                        const conflictCount = isConflicts ? crewLeaveConflicts.length : 0
+                        return (
+                          <li key={tab.key} className="nav-item">
+                            <button
+                              type="button"
+                              className={"nav-link" + (crewLeavePlannerTab === tab.key ? " active" : "")}
+                              onClick={() =>
+                                setCrewLeavePlannerTab(
+                                  tab.key as
+                                    | "rotationTypes"
+                                    | "attendanceCodes"
+                                    | "dailyAttendance"
+                                    | "generator"
+                                    | "blocks"
+                                    | "timeline"
+                                    | "conflicts",
+                                )
+                              }
+                            >
+                              {tab.label}
+                              {isConflicts && conflictCount > 0 ? (
+                                <span
+                                  className="badge rounded-pill bg-danger ms-2"
+                                  style={{ fontSize: "0.7rem" }}
+                                >
+                                  {conflictCount}
+                                </span>
+                              ) : null}
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+
+                    {crewLeavePlannerTab === "rotationTypes" ? (
+                      <>
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
+                            <span>Rotation Types</span>
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                setEditingRotationId(null)
+                                setCrewLeavePolicyForm({
+                                  policyName: "",
+                                  crewType: "Captain",
+                                  workPatternDays: "90",
+                                  leavePatternDays: "30",
+                                  codeThresholdsJson: "{}",
+                                  activeStatus: "Active",
+                                })
+                                setCrewLeavePolicyThresholds(
+                                  crewOpsDeductionCodes.reduce((acc, row) => {
+                                    acc[row.code] = "0"
+                                    return acc
+                                  }, {} as Record<string, string>),
+                                )
+                                setIsRotationModalOpen(true)
+                              }}
+                            >
+                              + New Rotation
+                            </Button>
+                          </div>
+                          <div className="card-body">
+                            <div className="text-muted small">
+                              Create rotation types with the <strong>+ New Rotation</strong> popup.
+                            </div>
+                          </div>
+                        </div>
+                        <div className="card border">
+                          <div style={{ height: 420 }}>
+                            <DataGrid
+                              rows={crewLeavePolicies}
+                              columns={[
+                                { field: "policyName", headerName: "Name", minWidth: 220, flex: 1 },
+                                { field: "crewType", headerName: "Category", width: 170 },
+                                { field: "workPatternDays", headerName: "Work Days", width: 120 },
+                                { field: "leavePatternDays", headerName: "Leave Days", width: 120 },
+                                {
+                                  field: "codeThresholdsJson",
+                                  headerName: "Code Thresholds",
+                                  minWidth: 220,
+                                  flex: 1,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const raw = String(params.value || "{}")
+                                    try {
+                                      const parsed = JSON.parse(raw) as Record<string, string>
+                                      const txt = Object.entries(parsed)
+                                        .map(([k, v]) => `${k}:${v}`)
+                                        .join(", ")
+                                      return txt || "-"
+                                    } catch {
+                                      return "-"
+                                    }
+                                  },
+                                },
+                                {
+                                  field: "__cycles",
+                                  headerName: "Cycles / year",
+                                  width: 120,
+                                  valueGetter: (_v, row) => {
+                                    const w = Number(row.workPatternDays || "0")
+                                    const l = Number(row.leavePatternDays || "0")
+                                    const c = w + l
+                                    return c > 0 ? String(Math.round(365 / c)) : "-"
+                                  },
+                                },
+                                {
+                                  field: "__actions",
+                                  headerName: "Actions",
+                                  width: 160,
+                                  sortable: false,
+                                  filterable: false,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const row = params.row as Entry
+                                    return (
+                                      <div className="d-flex gap-2">
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link p-0"
+                                          onClick={() => editCrewLeavePolicy(row.id)}
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link text-danger p-0"
+                                          onClick={() => deleteCrewLeavePolicy(row.id)}
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    )
+                                  },
+                                },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "attendanceCodes" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold">
+                            Attendance Codes (Crew Ops)
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2">
+                              <div className="col-12 col-md-2">
+                                <label className="form-label small fw-semibold">Code</label>
+                                <input
+                                  className="form-control text-uppercase"
+                                  value={crewOpsCodeForm.code}
+                                  onChange={(e) =>
+                                    setCrewOpsCodeForm((p) => ({ ...p, code: e.target.value.toUpperCase() }))
+                                  }
+                                />
+                              </div>
+                              <div className="col-12 col-md-5">
+                                <label className="form-label small fw-semibold">Name</label>
+                                <input
+                                  className="form-control"
+                                  value={crewOpsCodeForm.name}
+                                  onChange={(e) => setCrewOpsCodeForm((p) => ({ ...p, name: e.target.value }))}
+                                  placeholder="e.g. Medical Certificate"
+                                />
+                              </div>
+                              <div className="col-12 col-md-3">
+                                <label className="form-label small fw-semibold">Allow Leave Deduction</label>
+                                <select
+                                  className="form-select"
+                                  value={crewOpsCodeForm.allowLeaveDeduction}
+                                  onChange={(e) =>
+                                    setCrewOpsCodeForm((p) => ({ ...p, allowLeaveDeduction: e.target.value }))
+                                  }
+                                >
+                                  <option value="Yes">Yes</option>
+                                  <option value="No">No</option>
+                                </select>
+                              </div>
+                              <div className="col-12 col-md-2 d-flex align-items-end">
+                                <Button onClick={saveCrewOpsCode}>Save Code</Button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="card border">
+                          <div style={{ height: 380 }}>
+                            <DataGrid
+                              rows={crewOpsCodeConfigs.map((row) => ({
+                                id: row.id,
+                                code: (row.code || "").trim().toUpperCase(),
+                                codeName: row.codeName || "",
+                                allowLeaveDeduction: (row.allowLeaveDeduction || "No") === "Yes" ? "Yes" : "No",
+                              }))}
+                              columns={[
+                                { field: "code", headerName: "Code", width: 120 },
+                                { field: "codeName", headerName: "Name", minWidth: 220, flex: 1 },
+                                {
+                                  field: "allowLeaveDeduction",
+                                  headerName: "Allow Leave Deduction",
+                                  width: 180,
+                                },
+                                {
+                                  field: "__actions",
+                                  headerName: "Actions",
+                                  width: 150,
+                                  sortable: false,
+                                  filterable: false,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const row = params.row as Entry
+                                    return (
+                                      <div className="d-flex gap-2">
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link p-0"
+                                          onClick={() => editCrewOpsCode(row.id)}
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link text-danger p-0"
+                                          onClick={() => deleteCrewOpsCode(row.id)}
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    )
+                                  },
+                                },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "dailyAttendance" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold">
+                            Daily Attendance Record
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2">
+                              <div className="col-12 col-md-4">
+                                <label className="form-label small fw-semibold">Crew</label>
+                                <select
+                                  className="form-select"
+                                  value={crewLeaveMarkForm.crewCode}
+                                  onChange={(e) => setCrewLeaveMarkForm((p) => ({ ...p, crewCode: e.target.value }))}
+                                >
+                                  <option value="">Select Crew</option>
+                                  {store.crewDataBase.map((c) => (
+                                    <option key={c.id} value={normalizeCrewCode(c.crewCode || "")}>
+                                      {normalizeCrewCode(c.crewCode || "")} - {c.crewName || ""}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Code</label>
+                                <select
+                                  className="form-select"
+                                  value={crewLeaveMarkForm.markType}
+                                  onChange={(e) => setCrewLeaveMarkForm((p) => ({ ...p, markType: e.target.value }))}
+                                >
+                                  {crewOpsCodeConfigs.map((row) => (
+                                    <option key={row.id} value={(row.code || "").trim().toUpperCase()}>
+                                      {(row.code || "").trim().toUpperCase()} - {row.codeName || ""}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">From Date</label>
+                                <input
+                                  type="date"
+                                  className="form-control"
+                                  value={crewLeaveMarkForm.fromDate}
+                                  onChange={(e) => setCrewLeaveMarkForm((p) => ({ ...p, fromDate: e.target.value }))}
+                                />
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">To Date</label>
+                                <input
+                                  type="date"
+                                  className="form-control"
+                                  value={crewLeaveMarkForm.toDate}
+                                  onChange={(e) => setCrewLeaveMarkForm((p) => ({ ...p, toDate: e.target.value }))}
+                                />
+                              </div>
+                              <div className="col-6 col-md-2 d-flex align-items-end">
+                                <Button onClick={addCrewLeaveMark}>Add Record</Button>
+                              </div>
+                              <div className="col-12">
+                                <label className="form-label small fw-semibold">Reason</label>
+                                <input
+                                  className="form-control"
+                                  value={crewLeaveMarkForm.reason}
+                                  onChange={(e) => setCrewLeaveMarkForm((p) => ({ ...p, reason: e.target.value }))}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="card border">
+                          <div style={{ height: 360 }}>
+                            <DataGrid
+                              rows={crewLeaveMarks.map((m) => ({
+                                id: m.id,
+                                crewCode: m.crewCode || "",
+                                crewName: m.crewName || "",
+                                markType: m.markType || "",
+                                fromDate: m.fromDate || "",
+                                toDate: m.toDate || "",
+                                noOfDays: m.noOfDays || "",
+                                reason: m.reason || "",
+                              }))}
+                              columns={[
+                                { field: "crewCode", headerName: "Crew Code", width: 120 },
+                                { field: "crewName", headerName: "Crew Name", minWidth: 170, flex: 1 },
+                                { field: "markType", headerName: "Code", width: 90 },
+                                { field: "fromDate", headerName: "From", width: 120 },
+                                { field: "toDate", headerName: "To", width: 120 },
+                                { field: "noOfDays", headerName: "Days", width: 90 },
+                                { field: "reason", headerName: "Reason", minWidth: 200, flex: 1 },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "generator" ? (
+                      <div className="card border">
+                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Generate Rotation</div>
+                        <div className="card-body">
+                          <div className="alert alert-info py-2 small mb-3">
+                            Rotation Start Date is taken from <strong>Crew Data Base → Release Date</strong>. Employment Date uses
+                            <strong> Joining Date</strong>.
+                          </div>
+                          <div className="row g-2 mb-2">
+                            <div className="col-12 col-md-4">
+                              <label className="form-label small fw-semibold">Crew Member</label>
+                            <select
+                              className="form-select"
+                              value={crewLeaveAssignmentForm.crewCode}
+                              onChange={(e) =>
+                                setCrewLeaveAssignmentForm((p) => ({ ...p, crewCode: e.target.value, policyId: "" }))
+                              }
+                            >
+                                <option value="">Select Crew</option>
+                                {store.crewDataBase.map((c) => (
+                                  <option key={c.id} value={normalizeCrewCode(c.crewCode || "")}>
+                                    {normalizeCrewCode(c.crewCode || "")} - {c.crewName || ""} ({c.crewType || "-"})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="col-12 col-md-6">
+                              <label className="form-label small fw-semibold">Rotation Type</label>
+                              <select
+                                className="form-select"
+                                value={crewLeaveAssignmentForm.policyId}
+                                onChange={(e) => setCrewLeaveAssignmentForm((p) => ({ ...p, policyId: e.target.value }))}
+                              >
+                                <option value="">Select Policy</option>
+                                {crewLeavePolicies
+                                  .filter((p) => (p.activeStatus || "").trim() === "Active")
+                                  .filter((p) => {
+                                    if (!crewLeaveAssignmentForm.crewCode) return true
+                                    const crew = store.crewDataBase.find(
+                                      (c) => normalizeCrewCode(c.crewCode || "") === crewLeaveAssignmentForm.crewCode,
+                                    )
+                                    return (p.crewType || "").trim() === (crew?.crewType || "").trim()
+                                  })
+                                  .map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.policyName || "-"} ({p.workPatternDays || "-"} / {p.leavePatternDays || "-"})
+                                    </option>
+                                  ))}
+                              </select>
+                            </div>
+                            <div className="col-12 col-md-2 d-flex align-items-end">
+                              <Button onClick={assignCrewLeavePolicy}>Assign</Button>
+                            </div>
+                          </div>
+
+                          <div className="row g-2">
+                            <div className="col-6 col-md-3">
+                              <label className="form-label small fw-semibold">Years to Generate</label>
+                              <input
+                                type="number"
+                                min={1}
+                                max={10}
+                                className="form-control"
+                                value={crewLeaveGeneratorForm.years}
+                                onChange={(e) => setCrewLeaveGeneratorForm((p) => ({ ...p, years: e.target.value }))}
+                              />
+                            </div>
+                            <div className="col-6 col-md-4">
+                              <label className="form-label small fw-semibold">Replace existing blocks</label>
+                              <select
+                                className="form-select"
+                                value={crewLeaveGeneratorForm.replaceExisting}
+                                onChange={(e) =>
+                                  setCrewLeaveGeneratorForm((p) => ({ ...p, replaceExisting: e.target.value }))
+                                }
+                              >
+                                <option value="Yes">Yes</option>
+                                <option value="No">No</option>
+                              </select>
+                            </div>
+                            <div className="col-12 col-md-5 d-flex align-items-end">
+                              <Button onClick={generateCrewLeaveBlocks}>Generate</Button>
+                            </div>
+                          </div>
+
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {isRotationModalOpen ? (
+                      <div
+                        className="modal show d-block"
+                        tabIndex={-1}
+                        style={{ background: "rgba(0,0,0,0.45)" }}
+                        onClick={() => setIsRotationModalOpen(false)}
+                      >
+                        <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+                          <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+                            <div className="modal-header border-0 pb-0">
+                              <h5 className="modal-title">New Rotation Type</h5>
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-light rounded-circle"
+                                onClick={() => setIsRotationModalOpen(false)}
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                            <div className="modal-body">
+                              <div className="mb-2">
+                                <label className="form-label small fw-semibold">Name</label>
+                                <input
+                                  className="form-control"
+                                  value={crewLeavePolicyForm.policyName}
+                                  onChange={(e) => setCrewLeavePolicyForm((p) => ({ ...p, policyName: e.target.value }))}
+                                />
+                              </div>
+                              <div className="mb-2">
+                                <label className="form-label small fw-semibold">Category</label>
+                                <select
+                                  className="form-select"
+                                  value={crewLeavePolicyForm.crewType}
+                                  onChange={(e) => setCrewLeavePolicyForm((p) => ({ ...p, crewType: e.target.value }))}
+                                >
+                                  {(crewTypes.length > 0 ? crewTypes : ["Captain", "First Officer", "Cabin Crew"]).map((t) => (
+                                    <option key={t} value={t}>{t}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="row g-2 mb-2">
+                                <div className="col-6">
+                                  <label className="form-label small fw-semibold">Work Days</label>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    className="form-control"
+                                    value={crewLeavePolicyForm.workPatternDays}
+                                    onChange={(e) => setCrewLeavePolicyForm((p) => ({ ...p, workPatternDays: e.target.value }))}
+                                  />
+                                </div>
+                                <div className="col-6">
+                                  <label className="form-label small fw-semibold">Leave Days</label>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    className="form-control"
+                                    value={crewLeavePolicyForm.leavePatternDays}
+                                    onChange={(e) => setCrewLeavePolicyForm((p) => ({ ...p, leavePatternDays: e.target.value }))}
+                                  />
+                                </div>
+                              </div>
+                              <div className="row g-2 mb-2">
+                                {crewOpsDeductionCodes.length === 0 ? (
+                                  <div className="col-12 small text-muted">
+                                    No allowed deduction codes found. Enable codes in Attendance Codes tab first.
+                                  </div>
+                                ) : (
+                                  crewOpsDeductionCodes.map((row) => (
+                                    <div className="col-6" key={row.code}>
+                                      <label className="form-label small fw-semibold">
+                                        {row.code} ({row.name}) Threshold / Cycle
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        className="form-control"
+                                        value={crewLeavePolicyThresholds[row.code] || "0"}
+                                        onChange={(e) =>
+                                          setCrewLeavePolicyThresholds((prev) => ({
+                                            ...prev,
+                                            [row.code]: e.target.value,
+                                          }))
+                                        }
+                                      />
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                              <div className="small text-muted mb-2">
+                                If cycle total exceeds threshold, the excess is deducted from leave days.
+                              </div>
+                              {rotationYearPreview ? (
+                                <div className="border rounded p-2 bg-body-tertiary mb-2">
+                                  <div className="small fw-semibold mb-1">Year fit preview</div>
+                                  <div className="small">
+                                    {rotationYearPreview.work} work + {rotationYearPreview.leave} leave = {rotationYearPreview.cycle}-day cycle
+                                  </div>
+                                  <div className="small text-muted">
+                                    365 ÷ {rotationYearPreview.cycle} = {rotationYearPreview.cyclesPerYear.toFixed(2)} cycles/yr (nearest: {rotationYearPreview.nearest})
+                                  </div>
+                                  <div className="small">
+                                    With {rotationYearPreview.nearest} cycles: {rotationYearPreview.covered} days covered,{" "}
+                                    <span className={rotationYearPreview.diff > 0 ? "text-success" : rotationYearPreview.diff < 0 ? "text-danger" : ""}>
+                                      {rotationYearPreview.diff > 0 ? "+" : ""}
+                                      {rotationYearPreview.diff} day vs year
+                                    </span>
+                                  </div>
+                                  <div className="small text-muted">
+                                    Leave per year ≈ {rotationYearPreview.leavePerYear.toFixed(1)} days · leave share {rotationYearPreview.leaveShare.toFixed(1)}%
+                                  </div>
+                                </div>
+                              ) : null}
+                              <div>
+                                <div className="small fw-semibold mb-1">Quick presets</div>
+                                <div className="d-flex flex-wrap gap-1">
+                                  {rotationQuickPresets.map((p) => {
+                                    const cycle = p.work + p.leave
+                                    const diff = Math.round((365 / cycle)) * cycle - 365
+                                    return (
+                                      <button
+                                        key={`${p.work}-${p.leave}`}
+                                        type="button"
+                                        className="btn btn-sm btn-outline-secondary"
+                                        onClick={() =>
+                                          setCrewLeavePolicyForm((prev) => ({
+                                            ...prev,
+                                            workPatternDays: String(p.work),
+                                            leavePatternDays: String(p.leave),
+                                          }))
+                                        }
+                                      >
+                                        {p.work}/{p.leave} · {Math.round(365 / cycle)}/yr · {diff > 0 ? "+" : ""}
+                                        {diff}d
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="modal-footer border-0 pt-0">
+                              <Button variant="outline" onClick={() => setIsRotationModalOpen(false)}>
+                                Cancel
+                              </Button>
+                              <Button
+                                onClick={() => {
+                                  saveCrewLeavePolicy()
+                                  setIsRotationModalOpen(false)
+                                }}
+                              >
+                                {editingRotationId ? "Update" : "Save"}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "blocks" ? (
+                      <div className="card border">
+                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Work & Leave Blocks — Planned vs Actual</div>
+                        <div className="card-body pb-0">
+                        <div className="row g-2">
+                          <div className="col-12 col-md-4">
+                            <label className="form-label small fw-semibold">Crew</label>
+                            <select
+                              className="form-select"
+                              value={crewLeaveBlocksFilter.crewCode}
+                              onChange={(e) => setCrewLeaveBlocksFilter((p) => ({ ...p, crewCode: e.target.value }))}
+                            >
+                              <option value="">All</option>
+                              {store.crewDataBase.map((c) => (
+                                <option key={c.id} value={normalizeCrewCode(c.crewCode || "")}>
+                                  {normalizeCrewCode(c.crewCode || "")} - {c.crewName || ""}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="col-6 col-md-3">
+                            <label className="form-label small fw-semibold">From</label>
+                            <input
+                              type="date"
+                              className="form-control"
+                              value={crewLeaveBlocksFilter.fromDate}
+                              onChange={(e) => setCrewLeaveBlocksFilter((p) => ({ ...p, fromDate: e.target.value }))}
+                            />
+                          </div>
+                          <div className="col-6 col-md-3">
+                            <label className="form-label small fw-semibold">To</label>
+                            <input
+                              type="date"
+                              className="form-control"
+                              value={crewLeaveBlocksFilter.toDate}
+                              onChange={(e) => setCrewLeaveBlocksFilter((p) => ({ ...p, toDate: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ height: 420 }}>
+                        <DataGrid
+                          rows={computedCrewGeneratedBlocks
+                            .filter((b) => {
+                              const crewCode = normalizeCrewCode(b.crewCode || "")
+                              const startDate = (b.startDate || "").trim()
+                              const endDate = (b.endDate || "").trim()
+                              if (crewLeaveBlocksFilter.crewCode && crewCode !== crewLeaveBlocksFilter.crewCode) return false
+                              if (crewLeaveBlocksFilter.fromDate && endDate < crewLeaveBlocksFilter.fromDate) return false
+                              if (crewLeaveBlocksFilter.toDate && startDate > crewLeaveBlocksFilter.toDate) return false
+                              return true
+                            })
+                            .map((b) => ({
+                            id: b.id,
+                            crewCode: b.crewCode || "",
+                            crewName: b.crewName || "",
+                            crewType: b.crewType || "",
+                            policyName: b.policyName || "",
+                            cycleNumber: b.cycleNumber || "",
+                            blockType: b.blockType || "",
+                            startDate: b.startDate || "",
+                            endDate: b.endDate || "",
+                            plannedDays: b.plannedDays || "",
+                            actualDays: b.actualDays || b.plannedDays || "0",
+                            deductionDays: b.deductionDays || "0",
+                            delta: b.delta || "0",
+                          }))}
+                          columns={[
+                            { field: "crewCode", headerName: "Crew Code", width: 120 },
+                            { field: "crewName", headerName: "Crew Name", minWidth: 180, flex: 1 },
+                            { field: "crewType", headerName: "Crew Type", width: 160 },
+                            { field: "policyName", headerName: "Rotation Type", minWidth: 180, flex: 1 },
+                            { field: "cycleNumber", headerName: "Cycle", width: 90 },
+                            { field: "blockType", headerName: "Block", width: 100 },
+                            { field: "startDate", headerName: "Start Date", width: 120 },
+                            { field: "endDate", headerName: "End Date", width: 120 },
+                            { field: "plannedDays", headerName: "Planned", width: 90 },
+                            { field: "actualDays", headerName: "Actual", width: 90 },
+                            { field: "deductionDays", headerName: "Deduction", width: 100 },
+                            { field: "delta", headerName: "Δ", width: 70 },
+                          ]}
+                          disableRowSelectionOnClick
+                          rowHeight={34}
+                          sx={gridSx}
+                        />
+                      </div>
+                    </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "timeline" ? (
+                      <div className="card border">
+                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Daily Ops Timeline</div>
+                        <div className="card-body">
+                          <div className="row g-2 mb-3">
+                            <div className="col-6 col-md-3">
+                              <label className="form-label small fw-semibold">From Date</label>
+                              <input
+                                type="date"
+                                className="form-control"
+                                value={crewLeaveTimelineFilter.fromDate}
+                                onChange={(e) =>
+                                  setCrewLeaveTimelineFilter((p) => ({ ...p, fromDate: e.target.value }))
+                                }
+                              />
+                            </div>
+                            <div className="col-6 col-md-3">
+                              <label className="form-label small fw-semibold">To Date</label>
+                              <input
+                                type="date"
+                                className="form-control"
+                                value={crewLeaveTimelineFilter.toDate}
+                                onChange={(e) =>
+                                  setCrewLeaveTimelineFilter((p) => ({ ...p, toDate: e.target.value }))
+                                }
+                              />
+                            </div>
+                          </div>
+                          {!crewLeaveTimelineView.crewRows.length || !crewLeaveTimelineView.dates.length ? (
+                            <div className="small text-muted">
+                              No generated blocks for selected date range. Generate rotation first, then open timeline.
+                            </div>
+                          ) : (
+                            <div style={{ overflow: "auto", maxHeight: 560, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                              <div style={{ minWidth: 980 }}>
+                                <div className="d-flex border-bottom" style={{ position: "sticky", top: 0, zIndex: 8, background: "var(--bs-body-bg)" }}>
+                                  <div
+                                    style={{
+                                      width: 220,
+                                      minWidth: 220,
+                                      position: "sticky",
+                                      left: 0,
+                                      zIndex: 9,
+                                      background: "var(--bs-body-bg)",
+                                      padding: "8px 10px",
+                                      borderRight: "1px solid #e5e7eb",
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    Crew Code
+                                  </div>
+                                  <div className="d-flex">
+                                    {crewLeaveTimelineView.dates.map((date) => (
+                                      <div
+                                        key={date}
+                                        style={{
+                                          width: 36,
+                                          minWidth: 36,
+                                          fontSize: 10,
+                                          textAlign: "center",
+                                          padding: "6px 0",
+                                          borderRight: "1px solid #eef2f7",
+                                          color: "#64748b",
+                                        }}
+                                      >
+                                        {date.slice(8, 10)}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {crewLeaveTimelineView.crewRows.map((row) => (
+                                  <div key={row.crewCode} className="d-flex border-bottom" style={{ minHeight: 44 }}>
+                                    <div
+                                      style={{
+                                        width: 220,
+                                        minWidth: 220,
+                                        position: "sticky",
+                                        left: 0,
+                                        zIndex: 7,
+                                        background: "var(--bs-body-bg)",
+                                        padding: "8px 10px",
+                                        borderRight: "1px solid #e5e7eb",
+                                        fontWeight: 600,
+                                        fontSize: 13,
+                                      }}
+                                    >
+                                      {row.crewCode}
+                                      <div className="small text-muted text-truncate">{row.crewName || "-"}</div>
+                                    </div>
+                                    <div
+                                      style={{
+                                        position: "relative",
+                                        width: crewLeaveTimelineView.totalDays * 36,
+                                        minWidth: crewLeaveTimelineView.totalDays * 36,
+                                        backgroundImage:
+                                          "repeating-linear-gradient(to right, transparent, transparent 35px, #f1f5f9 35px, #f1f5f9 36px)",
+                                      }}
+                                    >
+                                      {row.blocks.map((block) => {
+                                        const start = (block.startDate || "").trim()
+                                        const end = (block.endDate || "").trim()
+                                        const viewStart = (crewLeaveTimelineFilter.fromDate || "").trim()
+                                        const viewEnd = (crewLeaveTimelineFilter.toDate || "").trim()
+                                        const overlapStart = start > viewStart ? start : viewStart
+                                        const overlapEnd = end < viewEnd ? end : viewEnd
+                                        const leftDays = overlapDaysInclusive(viewStart, addDaysToYmd(overlapStart, -1), viewStart, viewEnd)
+                                        const spanDays = overlapDaysInclusive(overlapStart, overlapEnd, viewStart, viewEnd)
+                                        const isLeave = (block.blockType || "").toLowerCase() === "leave"
+                                        if (spanDays <= 0) return null
+                                        return (
+                                          <div
+                                            key={block.id}
+                                            title={`${(block.blockType || "").toUpperCase()} | ${start} to ${end}`}
+                                            style={{
+                                              position: "absolute",
+                                              left: leftDays * 36 + 1,
+                                              top: 8,
+                                              height: 26,
+                                              width: Math.max(spanDays * 36 - 2, 10),
+                                              borderRadius: 6,
+                                              background: isLeave ? "#dcfce7" : "#dbeafe",
+                                              border: `1px solid ${isLeave ? "#86efac" : "#93c5fd"}`,
+                                              color: isLeave ? "#166534" : "#1e3a8a",
+                                              fontSize: 11,
+                                              fontWeight: 700,
+                                              padding: "4px 6px",
+                                              whiteSpace: "nowrap",
+                                              overflow: "hidden",
+                                              textOverflow: "ellipsis",
+                                            }}
+                                          >
+                                            {(block.blockType || "").toUpperCase()} {start} → {end}
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "conflicts" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
+                            <span>Conflict Detection</span>
+                            <span className="small text-muted">
+                              Generated blocks scanned: {crewGeneratedBlocks.length}
+                            </span>
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2 mb-2">
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Default limit / day</label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  className="form-control"
+                                  value={crewLeaveConflictConfig.defaultThreshold}
+                                  onChange={(e) =>
+                                    setCrewLeaveConflictConfig((p) => ({
+                                      ...p,
+                                      defaultThreshold: Number(e.target.value) || 0,
+                                    }))
+                                  }
+                                />
+                                <div className="small text-muted">
+                                  Max concurrent crew on leave per type
+                                </div>
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Crew Type</label>
+                                <select
+                                  className="form-select"
+                                  value={crewLeaveConflictConfig.crewTypeFilter}
+                                  onChange={(e) =>
+                                    setCrewLeaveConflictConfig((p) => ({
+                                      ...p,
+                                      crewTypeFilter: e.target.value,
+                                    }))
+                                  }
+                                >
+                                  <option value="">All</option>
+                                  {crewTypes.map((t) => (
+                                    <option key={t} value={t}>
+                                      {t}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Severity</label>
+                                <select
+                                  className="form-select"
+                                  value={crewLeaveConflictConfig.severityFilter}
+                                  onChange={(e) =>
+                                    setCrewLeaveConflictConfig((p) => ({
+                                      ...p,
+                                      severityFilter: e.target.value as
+                                        | "all"
+                                        | "high"
+                                        | "medium"
+                                        | "low",
+                                    }))
+                                  }
+                                >
+                                  <option value="all">All</option>
+                                  <option value="high">High</option>
+                                  <option value="medium">Medium</option>
+                                  <option value="low">Low</option>
+                                </select>
+                              </div>
+                              <div className="col-6 col-md-3">
+                                <label className="form-label small fw-semibold">From</label>
+                                <input
+                                  type="date"
+                                  className="form-control"
+                                  value={crewLeaveConflictConfig.fromDate}
+                                  onChange={(e) =>
+                                    setCrewLeaveConflictConfig((p) => ({
+                                      ...p,
+                                      fromDate: e.target.value,
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <div className="col-6 col-md-3">
+                                <label className="form-label small fw-semibold">To</label>
+                                <input
+                                  type="date"
+                                  className="form-control"
+                                  value={crewLeaveConflictConfig.toDate}
+                                  onChange={(e) =>
+                                    setCrewLeaveConflictConfig((p) => ({
+                                      ...p,
+                                      toDate: e.target.value,
+                                    }))
+                                  }
+                                />
+                              </div>
+                            </div>
+
+                            {crewTypes.length > 0 ? (
+                              <div className="border rounded p-2 bg-body-tertiary">
+                                <div className="small fw-semibold mb-2">
+                                  Per-type limit override (blank = use default)
+                                </div>
+                                <div className="row g-2">
+                                  {crewTypes.map((t) => (
+                                    <div key={t} className="col-6 col-md-3">
+                                      <label className="form-label small">{t}</label>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        className="form-control form-control-sm"
+                                        placeholder={`Default: ${crewLeaveConflictConfig.defaultThreshold}`}
+                                        value={
+                                          crewLeaveConflictConfig.thresholdsByType[t] !== undefined
+                                            ? String(crewLeaveConflictConfig.thresholdsByType[t])
+                                            : ""
+                                        }
+                                        onChange={(e) => {
+                                          const v = e.target.value
+                                          setCrewLeaveConflictConfig((p) => {
+                                            const next = { ...p.thresholdsByType }
+                                            if (v === "") {
+                                              delete next[t]
+                                            } else {
+                                              next[t] = Number(v) || 0
+                                            }
+                                            return { ...p, thresholdsByType: next }
+                                          })
+                                        }}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <div className="row g-2">
+                          <div className="col-4">
+                            <div className="card border h-100">
+                              <div className="card-body py-2">
+                                <div className="small text-muted">High severity</div>
+                                <div className="h4 mb-0 text-danger">
+                                  {crewLeaveConflictsCountsBySeverity.high}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="col-4">
+                            <div className="card border h-100">
+                              <div className="card-body py-2">
+                                <div className="small text-muted">Medium severity</div>
+                                <div className="h4 mb-0 text-warning">
+                                  {crewLeaveConflictsCountsBySeverity.medium}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="col-4">
+                            <div className="card border h-100">
+                              <div className="card-body py-2">
+                                <div className="small text-muted">Low severity</div>
+                                <div className="h4 mb-0 text-info">
+                                  {crewLeaveConflictsCountsBySeverity.low}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
+                            <span>Detected conflicts ({crewLeaveConflicts.length})</span>
+                          </div>
+                          <div style={{ height: 460 }}>
+                            <DataGrid
+                              rows={crewLeaveConflicts}
+                              columns={[
+                                {
+                                  field: "severity",
+                                  headerName: "Severity",
+                                  width: 110,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const sev = String(params.value || "")
+                                    const cls =
+                                      sev === "high"
+                                        ? "bg-danger-subtle text-danger-emphasis"
+                                        : sev === "medium"
+                                          ? "bg-warning-subtle text-warning-emphasis"
+                                          : "bg-info-subtle text-info-emphasis"
+                                    return (
+                                      <span className={"badge rounded-pill " + cls}>
+                                        {sev.toUpperCase()}
+                                      </span>
+                                    )
+                                  },
+                                },
+                                { field: "type", headerName: "Type", width: 130 },
+                                { field: "crewCode", headerName: "Crew", minWidth: 140, flex: 1 },
+                                { field: "crewName", headerName: "Name", minWidth: 160, flex: 1 },
+                                { field: "crewType", headerName: "Category", width: 140 },
+                                { field: "startDate", headerName: "Start", width: 120 },
+                                { field: "endDate", headerName: "End", width: 120 },
+                                {
+                                  field: "message",
+                                  headerName: "Details",
+                                  minWidth: 280,
+                                  flex: 2,
+                                },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : isCrewOperationBlankModule ? (
+                  <div className="card border">
+                    <div className="card-body py-5 text-center">
+                      <h3 className="h6 fw-semibold mb-2">{activeConfig.title}</h3>
+                      <p className="text-muted mb-0">
+                        Blank screen ready. This module is independent and not linked to current modules.
+                      </p>
+                    </div>
+                  </div>
                 ) : (
                   <div className="d-flex flex-column gap-3">
                     <div className="d-flex flex-wrap align-items-center gap-2">
@@ -6950,12 +9219,39 @@ export default function Page() {
                           </label>
                         </>
                       ) : null}
+                      {activeConfig.key === "crewDataBase" ? (
+                        <>
+                          <input
+                            type="text"
+                            className="form-control"
+                            style={{ maxWidth: 360 }}
+                            placeholder="Search Crew: Code, Name, Staff ID"
+                            value={crewDbSearch}
+                            onChange={(e) => setCrewDbSearch(e.target.value)}
+                          />
+                          <label className="btn btn-outline-secondary mb-0">
+                            <span>Upload Crew CSV</span>
+                            <input
+                              type="file"
+                              accept=".csv,text/csv"
+                              className="d-none"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0]
+                                if (!file) return
+                                await importCrewDatabaseCsv(file)
+                                e.currentTarget.value = ""
+                              }}
+                            />
+                          </label>
+                        </>
+                      ) : null}
                     </div>
 
                     <div className="card border">
                       <div style={{ height: 520 }}>
                         <DataGrid
-                          rows={store[activeConfig.key]}
+                          rows={filteredActiveRows}
+                          disableVirtualization={activeConfig.key === "crewDataBase"}
                           columns={[
                             ...activeConfig.columns.map((column) => ({
                               field: column,
@@ -6965,29 +9261,56 @@ export default function Page() {
                                   ? 130
                                   : activeConfig.key === "leaves" && column === "staffName"
                                     ? 220
+                                    : activeConfig.key === "crewDataBase" && column === "crewCode"
+                                      ? 130
+                                      : activeConfig.key === "crewDataBase" && column === "crewName"
+                                        ? 220
+                                        : activeConfig.key === "crewDataBase" && column === "crewType"
+                                          ? 180
                                     : 150,
                               width:
                                 activeConfig.key === "leaves" && column === "staffNo"
                                   ? 130
                                   : activeConfig.key === "leaves" && column === "staffName"
                                     ? 220
+                                    : activeConfig.key === "crewDataBase" && column === "crewCode"
+                                      ? 130
+                                      : activeConfig.key === "crewDataBase" && column === "crewName"
+                                        ? 220
+                                        : activeConfig.key === "crewDataBase" && column === "crewType"
+                                          ? 180
                                     : undefined,
                               flex:
                                 activeConfig.key === "leaves" &&
                                 (column === "staffNo" || column === "staffName")
                                   ? 0
+                                  : activeConfig.key === "crewDataBase" &&
+                                    (column === "crewCode" || column === "crewName" || column === "crewType")
+                                    ? 0
                                   : 1,
                               headerClassName:
                                 activeConfig.key === "leaves" && column === "staffNo"
                                   ? "leaves-sticky-1-header"
                                   : activeConfig.key === "leaves" && column === "staffName"
                                     ? "leaves-sticky-2-header"
+                                    : activeConfig.key === "crewDataBase" && column === "crewCode"
+                                      ? "crewdb-sticky-1-header"
+                                      : activeConfig.key === "crewDataBase" && column === "crewName"
+                                        ? "crewdb-sticky-2-header"
+                                        : activeConfig.key === "crewDataBase" && column === "crewType"
+                                          ? "crewdb-sticky-3-header"
                                     : undefined,
                               cellClassName:
                                 activeConfig.key === "leaves" && column === "staffNo"
                                   ? "leaves-sticky-1-cell"
                                   : activeConfig.key === "leaves" && column === "staffName"
                                     ? "leaves-sticky-2-cell"
+                                    : activeConfig.key === "crewDataBase" && column === "crewCode"
+                                      ? "crewdb-sticky-1-cell"
+                                      : activeConfig.key === "crewDataBase" && column === "crewName"
+                                        ? "crewdb-sticky-2-cell"
+                                        : activeConfig.key === "crewDataBase" && column === "crewType"
+                                          ? "crewdb-sticky-3-cell"
                                     : undefined,
                               renderCell: (params: GridRenderCellParams) => {
                                 const entry = params.row as Entry
@@ -7382,7 +9705,8 @@ export default function Page() {
                             {field.label}
                             {field.required ? <span className="text-danger ms-1">*</span> : null}
                           </label>
-                          {activeConfig.key === "staff" && field.key === "activeStatus" ? (
+                          {(activeConfig.key === "staff" || activeConfig.key === "crewDataBase") &&
+                          field.key === "activeStatus" ? (
                             <div className="border rounded p-2">
                               <div className="form-check form-switch mb-0">
                                 <input
