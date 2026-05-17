@@ -1389,6 +1389,8 @@ export default function Page() {
     fromDate: toYmd(new Date()),
     toDate: addDaysToYmd(toYmd(new Date()), 30),
   })
+  const [crewLeaveTimelineDayWidth, setCrewLeaveTimelineDayWidth] = useState(36)
+  const crewLeaveTimelineScrollRef = useRef<HTMLDivElement | null>(null)
   const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
     code: "MC",
     name: "",
@@ -1576,6 +1578,10 @@ export default function Page() {
         .filter((row) => Boolean(row.code)),
     [crewOpsCodeConfigs],
   )
+  const crewWithReleaseDate = useMemo(
+    () => store.crewDataBase.filter((c) => Boolean((c.releaseDate || "").trim())),
+    [store.crewDataBase],
+  )
   const filteredCrewGeneratedBlocks = useMemo(() => {
     return crewGeneratedBlocks.filter((b) => {
       const crewCode = normalizeCrewCode(b.crewCode || "")
@@ -1623,6 +1629,18 @@ export default function Page() {
     const crewRows = Array.from(crewMap.values()).sort((a, b) => a.crewCode.localeCompare(b.crewCode))
     return { dates, totalDays, crewRows }
   }, [crewGeneratedBlocks, crewLeaveTimelineFilter])
+  useEffect(() => {
+    if (crewLeavePlannerTab !== "timeline") return
+    const el = crewLeaveTimelineScrollRef.current
+    if (!el) return
+    const today = toYmd(new Date())
+    const idx = crewLeaveTimelineView.dates.indexOf(today)
+    if (idx < 0) return
+    const laneStartX = 220
+    const dayWidth = crewLeaveTimelineDayWidth
+    const targetX = laneStartX + idx * dayWidth - Math.max((el.clientWidth - laneStartX) / 2, 0)
+    el.scrollLeft = Math.max(targetX, 0)
+  }, [crewLeavePlannerTab, crewLeaveTimelineView.dates, crewLeaveTimelineDayWidth])
   const computedCrewGeneratedBlocks = useMemo(() => {
     const byCrewCycle = new Map<string, { work?: Entry; leave?: Entry }>()
     crewGeneratedBlocks.forEach((b) => {
@@ -1705,6 +1723,32 @@ export default function Page() {
     })
     return out
   }, [crewGeneratedBlocks, crewLeaveMarks, crewOpsCodeAllowMap])
+  const selectedCrewGeneratedSummary = useMemo(() => {
+    const selectedCrewCode = normalizeCrewCode(crewLeaveAssignmentForm.crewCode || "")
+    if (!selectedCrewCode) return null
+    const rows = crewGeneratedBlocks.filter((b) => normalizeCrewCode(b.crewCode || "") === selectedCrewCode)
+    if (!rows.length) {
+      return {
+        crewCode: selectedCrewCode,
+        exists: false,
+        totalBlocks: 0,
+        firstDate: "",
+        lastDate: "",
+        cycleCount: 0,
+      }
+    }
+    const starts = rows.map((r) => (r.startDate || "").trim()).filter(Boolean).sort()
+    const ends = rows.map((r) => (r.endDate || "").trim()).filter(Boolean).sort()
+    const cycleSet = new Set(rows.map((r) => (r.cycleNumber || "").trim()).filter(Boolean))
+    return {
+      crewCode: selectedCrewCode,
+      exists: true,
+      totalBlocks: rows.length,
+      firstDate: starts[0] || "",
+      lastDate: ends[ends.length - 1] || "",
+      cycleCount: cycleSet.size,
+    }
+  }, [crewLeaveAssignmentForm.crewCode, crewGeneratedBlocks])
 
   // Conflict / overlap detection for the Crew Leave Planner.
   // Detects:
@@ -8479,13 +8523,32 @@ export default function Page() {
                               }
                             >
                                 <option value="">Select Crew</option>
-                                {store.crewDataBase.map((c) => (
+                                {crewWithReleaseDate.map((c) => (
                                   <option key={c.id} value={normalizeCrewCode(c.crewCode || "")}>
                                     {normalizeCrewCode(c.crewCode || "")} - {c.crewName || ""} ({c.crewType || "-"})
                                   </option>
                                 ))}
                               </select>
                             </div>
+                            {selectedCrewGeneratedSummary ? (
+                              <div className="col-12">
+                                {selectedCrewGeneratedSummary.exists ? (
+                                  <div className="alert alert-warning py-2 small mb-1">
+                                    Rotation already generated for <strong>{selectedCrewGeneratedSummary.crewCode}</strong>.
+                                    Blocks: <strong>{selectedCrewGeneratedSummary.totalBlocks}</strong>, Cycles:{" "}
+                                    <strong>{selectedCrewGeneratedSummary.cycleCount}</strong>, Range:{" "}
+                                    <strong>
+                                      {selectedCrewGeneratedSummary.firstDate} to {selectedCrewGeneratedSummary.lastDate}
+                                    </strong>
+                                    . Use <strong>Replace existing blocks = Yes</strong> to overwrite.
+                                  </div>
+                                ) : (
+                                  <div className="alert alert-success py-2 small mb-1">
+                                    No generated rotation found for <strong>{selectedCrewGeneratedSummary.crewCode}</strong>.
+                                  </div>
+                                )}
+                              </div>
+                            ) : null}
                             <div className="col-12 col-md-6">
                               <label className="form-label small fw-semibold">Rotation Type</label>
                               <select
@@ -8823,49 +8886,136 @@ export default function Page() {
                                 }
                               />
                             </div>
+                            <div className="col-12 col-md-4">
+                              <label className="form-label small fw-semibold">
+                                Timeline Zoom ({crewLeaveTimelineDayWidth}px/day)
+                              </label>
+                              <input
+                                type="range"
+                                min={18}
+                                max={72}
+                                step={2}
+                                className="form-range"
+                                value={crewLeaveTimelineDayWidth}
+                                onChange={(e) => setCrewLeaveTimelineDayWidth(Number(e.target.value) || 36)}
+                              />
+                            </div>
                           </div>
                           {!crewLeaveTimelineView.crewRows.length || !crewLeaveTimelineView.dates.length ? (
                             <div className="small text-muted">
                               No generated blocks for selected date range. Generate rotation first, then open timeline.
                             </div>
                           ) : (
-                            <div style={{ overflow: "auto", maxHeight: 560, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                            <div
+                              ref={crewLeaveTimelineScrollRef}
+                              style={{ overflow: "auto", maxHeight: 560, border: "1px solid #e5e7eb", borderRadius: 8 }}
+                            >
                               <div style={{ minWidth: 980 }}>
-                                <div className="d-flex border-bottom" style={{ position: "sticky", top: 0, zIndex: 8, background: "var(--bs-body-bg)" }}>
-                                  <div
-                                    style={{
-                                      width: 220,
-                                      minWidth: 220,
-                                      position: "sticky",
-                                      left: 0,
-                                      zIndex: 9,
-                                      background: "var(--bs-body-bg)",
-                                      padding: "8px 10px",
-                                      borderRight: "1px solid #e5e7eb",
-                                      fontWeight: 700,
-                                    }}
-                                  >
-                                    Crew Code
-                                  </div>
-                                  <div className="d-flex">
-                                    {crewLeaveTimelineView.dates.map((date) => (
+                                {(() => {
+                                  const monthSegments: Array<{ key: string; label: string; count: number }> = []
+                                  crewLeaveTimelineView.dates.forEach((date) => {
+                                    const key = date.slice(0, 7)
+                                    const d = new Date(`${date}T00:00:00`)
+                                    const label = d.toLocaleDateString("en-US", { month: "short", year: "numeric" })
+                                    const last = monthSegments[monthSegments.length - 1]
+                                    if (last && last.key === key) {
+                                      last.count += 1
+                                    } else {
+                                      monthSegments.push({ key, label, count: 1 })
+                                    }
+                                  })
+                                  return (
+                                    <>
                                       <div
-                                        key={date}
-                                        style={{
-                                          width: 36,
-                                          minWidth: 36,
-                                          fontSize: 10,
-                                          textAlign: "center",
-                                          padding: "6px 0",
-                                          borderRight: "1px solid #eef2f7",
-                                          color: "#64748b",
-                                        }}
+                                        className="d-flex border-bottom"
+                                        style={{ position: "sticky", top: 0, zIndex: 9, background: "var(--bs-body-bg)" }}
                                       >
-                                        {date.slice(8, 10)}
+                                        <div
+                                          style={{
+                                            width: 220,
+                                            minWidth: 220,
+                                            position: "sticky",
+                                            left: 0,
+                                            zIndex: 10,
+                                            background: "var(--bs-body-bg)",
+                                            padding: "8px 10px",
+                                            borderRight: "1px solid #e5e7eb",
+                                            fontWeight: 700,
+                                          }}
+                                        >
+                                          Crew Code
+                                        </div>
+                                        <div className="d-flex">
+                                          {monthSegments.map((seg) => (
+                                            <div
+                                              key={seg.key}
+                                              style={{
+                                                width: seg.count * crewLeaveTimelineDayWidth,
+                                                minWidth: seg.count * crewLeaveTimelineDayWidth,
+                                                borderRight: "1px solid #e2e8f0",
+                                                display: "flex",
+                                                justifyContent: "center",
+                                                alignItems: "center",
+                                                background: "#f8fafc",
+                                                color: "#334155",
+                                                fontSize: 10,
+                                                fontWeight: 700,
+                                                letterSpacing: "0.03em",
+                                                padding: "2px 0",
+                                              }}
+                                            >
+                                              <span>{seg.label}</span>
+                                            </div>
+                                          ))}
+                                        </div>
                                       </div>
-                                    ))}
-                                  </div>
-                                </div>
+                                      <div
+                                        className="d-flex border-bottom"
+                                        style={{ position: "sticky", top: 27, zIndex: 8, background: "var(--bs-body-bg)" }}
+                                      >
+                                        <div
+                                          style={{
+                                            width: 220,
+                                            minWidth: 220,
+                                            position: "sticky",
+                                            left: 0,
+                                            zIndex: 9,
+                                            background: "var(--bs-body-bg)",
+                                            padding: "8px 10px",
+                                            borderRight: "1px solid #e5e7eb",
+                                            fontWeight: 700,
+                                          }}
+                                        >
+                                          Date / Day
+                                        </div>
+                                        <div className="d-flex">
+                                          {crewLeaveTimelineView.dates.map((date) => {
+                                            const isToday = date === toYmd(new Date())
+                                            return (
+                                              <div
+                                                key={date}
+                                                style={{
+                                                  width: crewLeaveTimelineDayWidth,
+                                                  minWidth: crewLeaveTimelineDayWidth,
+                                                  fontSize: 10,
+                                                  textAlign: "center",
+                                                  padding: "4px 0",
+                                                  borderRight: "1px solid #eef2f7",
+                                                  color: isToday ? "#0f172a" : "#64748b",
+                                                  background: isToday ? "#fff7ed" : "transparent",
+                                                  fontWeight: isToday ? 700 : 500,
+                                                }}
+                                              >
+                                                <div>{date.slice(8, 10)}</div>
+                                                <div>{formatYmdToWeekdayShort(date)}</div>
+                                              </div>
+                                            )
+                                          })}
+                                        </div>
+                                      </div>
+                                    </>
+                                  )
+                                })()}
 
                                 {crewLeaveTimelineView.crewRows.map((row) => (
                                   <div key={row.crewCode} className="d-flex border-bottom" style={{ minHeight: 44 }}>
@@ -8889,12 +9039,42 @@ export default function Page() {
                                     <div
                                       style={{
                                         position: "relative",
-                                        width: crewLeaveTimelineView.totalDays * 36,
-                                        minWidth: crewLeaveTimelineView.totalDays * 36,
+                                        width: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                        minWidth: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
                                         backgroundImage:
-                                          "repeating-linear-gradient(to right, transparent, transparent 35px, #f1f5f9 35px, #f1f5f9 36px)",
+                                          `repeating-linear-gradient(to right, transparent, transparent ${
+                                            crewLeaveTimelineDayWidth - 1
+                                          }px, #f1f5f9 ${crewLeaveTimelineDayWidth - 1}px, #f1f5f9 ${crewLeaveTimelineDayWidth}px)`,
                                       }}
                                     >
+                                      {(() => {
+                                        const today = toYmd(new Date())
+                                        const viewStart = (crewLeaveTimelineFilter.fromDate || "").trim()
+                                        const viewEnd = (crewLeaveTimelineFilter.toDate || "").trim()
+                                        if (!viewStart || !viewEnd) return null
+                                        if (today < viewStart || today > viewEnd) return null
+                                        const todayOffset = overlapDaysInclusive(
+                                          viewStart,
+                                          addDaysToYmd(today, -1),
+                                          viewStart,
+                                          viewEnd,
+                                        )
+                                        return (
+                                          <div
+                                            title={`Today: ${today}`}
+                                            style={{
+                                              position: "absolute",
+                                              left: todayOffset * crewLeaveTimelineDayWidth,
+                                              top: 0,
+                                              bottom: 0,
+                                              width: 2,
+                                              background: "#ef4444",
+                                              zIndex: 6,
+                                              pointerEvents: "none",
+                                            }}
+                                          />
+                                        )
+                                      })()}
                                       {row.blocks.map((block) => {
                                         const start = (block.startDate || "").trim()
                                         const end = (block.endDate || "").trim()
@@ -8912,10 +9092,10 @@ export default function Page() {
                                             title={`${(block.blockType || "").toUpperCase()} | ${start} to ${end}`}
                                             style={{
                                               position: "absolute",
-                                              left: leftDays * 36 + 1,
+                                              left: leftDays * crewLeaveTimelineDayWidth + 1,
                                               top: 8,
                                               height: 26,
-                                              width: Math.max(spanDays * 36 - 2, 10),
+                                              width: Math.max(spanDays * crewLeaveTimelineDayWidth - 2, 10),
                                               borderRadius: 6,
                                               background: isLeave ? "#dcfce7" : "#dbeafe",
                                               border: `1px solid ${isLeave ? "#86efac" : "#93c5fd"}`,
