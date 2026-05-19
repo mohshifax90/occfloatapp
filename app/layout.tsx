@@ -1,4 +1,5 @@
 import { Geist_Mono, Inter } from "next/font/google"
+import { SpeedInsights } from "@vercel/speed-insights/next"
 
 import "bootstrap/dist/css/bootstrap.min.css"
 import "./globals.css"
@@ -23,7 +24,10 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          {children}
+          <SpeedInsights />
+        </ThemeProvider>
       </body>
     </html>
   )

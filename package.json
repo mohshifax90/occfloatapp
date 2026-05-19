@@ -19,6 +19,7 @@
     "@mui/x-data-grid": "^9.0.4",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.1",
+    "@vercel/speed-insights": "^2.0.0",
     "bootstrap": "^5.3.8",
     "flowbite": "^4.0.1",
     "lucide-react": "^1.11.0",
