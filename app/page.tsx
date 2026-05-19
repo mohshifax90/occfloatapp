@@ -1205,6 +1205,14 @@ function addDaysToYmd(ymd: string, n: number): string {
   return toYmd(d)
 }
 
+function diffDaysYmd(fromYmd: string, toYmd: string): number {
+  if (!fromYmd || !toYmd) return 0
+  const a = new Date(`${fromYmd}T00:00:00`)
+  const b = new Date(`${toYmd}T00:00:00`)
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000))
+}
+
 function overlapDaysInclusive(startA: string, endA: string, startB: string, endB: string): number {
   if (!startA || !endA || !startB || !endB) return 0
   const s = startA > startB ? startA : startB
@@ -1415,6 +1423,27 @@ export default function Page() {
   const [leavePatternManagerSearch, setLeavePatternManagerSearch] = useState("")
   const [leavePatternManagerCrewCode, setLeavePatternManagerCrewCode] = useState("")
   const [leavePatternSegmentDraft, setLeavePatternSegmentDraft] = useState<Record<string, { start: string; end: string }>>({})
+  const [leaveDetailModal, setLeaveDetailModal] = useState<{
+    open: boolean
+    blockId: string
+    crewCode: string
+    crewName: string
+    cycleNumber: string
+    leaveStart: string
+    leaveEnd: string
+    policyName: string
+  }>({
+    open: false,
+    blockId: "",
+    crewCode: "",
+    crewName: "",
+    cycleNumber: "",
+    leaveStart: "",
+    leaveEnd: "",
+    policyName: "",
+  })
+  const [leaveDetailDraft, setLeaveDetailDraft] = useState({ start: "", end: "" })
+  const [leaveDetailSelectedCycle, setLeaveDetailSelectedCycle] = useState("")
   const [isRotationModalOpen, setIsRotationModalOpen] = useState(false)
   const [editingRotationId, setEditingRotationId] = useState<string | null>(null)
   const [crewLeaveBlocksFilter, setCrewLeaveBlocksFilter] = useState({
@@ -1430,6 +1459,19 @@ export default function Page() {
   const [showTimelineWpLpSummary, setShowTimelineWpLpSummary] = useState(true)
   const [crewLeaveTimelineDayWidth, setCrewLeaveTimelineDayWidth] = useState(36)
   const crewLeaveTimelineScrollRef = useRef<HTMLDivElement | null>(null)
+  const leaveBarDragRef = useRef<{
+    blockId: string
+    startX: number
+    moved: boolean
+  } | null>(null)
+  const lastLeaveBarDragAtRef = useRef(0)
+  const [draggingLeaveBlockId, setDraggingLeaveBlockId] = useState("")
+  const [lastLeaveBarAdjustment, setLastLeaveBarAdjustment] = useState<{
+    crewCode: string
+    cycleNumber: string
+    leaveDeltaDays: number
+    nextWorkDeltaDays: number
+  } | null>(null)
   const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
     code: "MC",
     name: "",
@@ -1869,6 +1911,16 @@ export default function Page() {
         rem: v.leaveActual || v.leave?.plannedDays || "0",
       }))
   }, [computedCrewGeneratedBlocks, leavePatternManagerCrewCode])
+  const leaveBlockByCrewCycle = useMemo(() => {
+    const map = new Map<string, Entry>()
+    computedCrewGeneratedBlocks.forEach((b) => {
+      if ((b.blockType || "").toLowerCase() !== "leave") return
+      const key = `${normalizeCrewCode(b.crewCode || "")}::${(b.cycleNumber || "").trim()}`
+      const existing = map.get(key)
+      if (!existing || (b.createdAt || "") > (existing.createdAt || "")) map.set(key, b)
+    })
+    return map
+  }, [computedCrewGeneratedBlocks])
   const leavePatternActualSegments = useMemo(
     () =>
       store.crewLeavePlanner.filter(
@@ -1893,6 +1945,98 @@ export default function Page() {
     })
     return byCycle
   }, [leavePatternActualSegments, leavePatternManagerCrewCode])
+  const leaveDetailActiveCycleNumber = (leaveDetailSelectedCycle || leaveDetailModal.cycleNumber || "").trim()
+  const leaveDetailSegmentsForActiveCycle = useMemo(() => {
+    if (!leaveDetailModal.open) return [] as Entry[]
+    return (
+      store.crewLeavePlanner
+        .filter((row) => (row.recordType || "").trim().toLowerCase() === "actualleavesegment")
+        .filter((row) => normalizeCrewCode(row.crewCode || "") === normalizeCrewCode(leaveDetailModal.crewCode))
+        .filter((row) => (row.cycleNumber || "").trim() === leaveDetailActiveCycleNumber)
+        .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""))
+    )
+  }, [store.crewLeavePlanner, leaveDetailModal, leaveDetailActiveCycleNumber])
+  const leaveDetailGeneratedRows = useMemo(() => {
+    if (!leaveDetailModal.open) return [] as Entry[]
+    const crewCode = normalizeCrewCode(leaveDetailModal.crewCode || "")
+    const selectedPolicy = (leaveDetailModal.policyName || "").trim()
+    const selectedBlockId = (leaveDetailModal.blockId || "").trim()
+
+    const selectedBlock = crewGeneratedBlocks.find((b) => (b.id || "").trim() === selectedBlockId)
+    const selectedCreatedAt = (selectedBlock?.createdAt || "").trim()
+
+    const base = crewGeneratedBlocks
+      .filter((b) => normalizeCrewCode(b.crewCode || "") === crewCode)
+      .filter((b) => !selectedPolicy || (b.policyName || "").trim() === selectedPolicy)
+      .filter((b) => !selectedCreatedAt || (b.createdAt || "").trim() === selectedCreatedAt)
+
+    const byCycleType = new Map<string, Entry>()
+    base.forEach((b) => {
+      const key = `${(b.cycleNumber || "").trim()}::${(b.blockType || "").trim().toLowerCase()}`
+      const existing = byCycleType.get(key)
+      if (!existing) {
+        byCycleType.set(key, b)
+        return
+      }
+      if ((b.createdAt || "") > (existing.createdAt || "")) {
+        byCycleType.set(key, b)
+      }
+    })
+    return Array.from(byCycleType.values()).sort((a, b) => {
+      const ca = Number(a.cycleNumber || "0") || 0
+      const cb = Number(b.cycleNumber || "0") || 0
+      if (ca !== cb) return ca - cb
+      const sa = (a.startDate || "").trim()
+      const sb = (b.startDate || "").trim()
+      if (sa !== sb) return sa.localeCompare(sb)
+      return (a.blockType || "").localeCompare(b.blockType || "")
+    })
+  }, [crewGeneratedBlocks, leaveDetailModal])
+  const leaveDetailPatternRows = useMemo(() => {
+    const byCycle = new Map<string, { work?: Entry; leave?: Entry }>()
+    leaveDetailGeneratedRows.forEach((b) => {
+      const cycle = (b.cycleNumber || "").trim() || "-"
+      const slot = byCycle.get(cycle) || {}
+      if ((b.blockType || "").toLowerCase() === "work") slot.work = b
+      if ((b.blockType || "").toLowerCase() === "leave") slot.leave = b
+      byCycle.set(cycle, slot)
+    })
+    return Array.from(byCycle.entries())
+      .sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0))
+      .map(([cycle, v]) => ({
+        id: `ld_rt${cycle}`,
+        cycleNumber: cycle,
+        cycleLabel: `Cycle ${cycle}`,
+        wpStart: v.work?.startDate || "",
+        wpEnd: v.work?.endDate || "",
+        wpDays: v.work?.plannedDays || "0",
+        wpOriginalStart: v.work?.originalStartDate || v.work?.startDate || "",
+        wpOriginalEnd: v.work?.originalEndDate || v.work?.endDate || "",
+        adjust: v.leave?.deductionDays || "0",
+        lpStart: v.leave?.startDate || "",
+        lpEnd: v.leave?.endDate || "",
+        lpDays: v.leave?.plannedDays || "0",
+        lpOriginalStart: v.leave?.originalStartDate || v.leave?.startDate || "",
+        lpOriginalEnd: v.leave?.originalEndDate || v.leave?.endDate || "",
+        rem: v.leave?.actualDays || v.leave?.plannedDays || "0",
+      }))
+  }, [leaveDetailGeneratedRows])
+  const leaveDetailActiveCycleRow = useMemo(
+    () => leaveDetailPatternRows.find((r) => (r.cycleNumber || "").trim() === leaveDetailActiveCycleNumber) || null,
+    [leaveDetailPatternRows, leaveDetailActiveCycleNumber],
+  )
+  const leaveDetailCycleUsedDays = useMemo(
+    () =>
+      leaveDetailSegmentsForActiveCycle.reduce((acc, s) => {
+        const d = Number(s.plannedDays || "0")
+        return acc + (Number.isFinite(d) ? d : 0)
+      }, 0),
+    [leaveDetailSegmentsForActiveCycle],
+  )
+  const leaveDetailCycleRemainingDays = useMemo(() => {
+    const remBase = Number(leaveDetailActiveCycleRow?.rem || "0") || 0
+    return Math.max(remBase - leaveDetailCycleUsedDays, 0)
+  }, [leaveDetailActiveCycleRow, leaveDetailCycleUsedDays])
   const crewTimelineCrewTypes = useMemo(() => {
     const set = new Set<string>()
     crewGeneratedBlocks.forEach((b) => {
@@ -5357,6 +5501,8 @@ export default function Page() {
           blockType: "work",
           startDate: workStart,
           endDate: workEnd,
+          originalStartDate: workStart,
+          originalEndDate: workEnd,
           plannedDays: String(workDays),
         })
         const leaveStart = addDaysToYmd(workEnd, 1)
@@ -5374,6 +5520,8 @@ export default function Page() {
           blockType: "leave",
           startDate: leaveStart,
           endDate: leaveEnd,
+          originalStartDate: leaveStart,
+          originalEndDate: leaveEnd,
           plannedDays: String(leaveDays),
         })
         cursor = addDaysToYmd(leaveEnd, 1)
@@ -5476,21 +5624,36 @@ export default function Page() {
     setIsFormOpen(true)
   }
 
-  const addLeavePatternActualSegment = (cycleNumber: string) => {
-    const crewCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+  const addActualLeaveSegment = (params: {
+    crewCode: string
+    cycleNumber: string
+    startDate: string
+    endDate: string
+    cycleLeaveStart?: string
+    cycleLeaveEnd?: string
+  }) => {
+    const crewCode = normalizeCrewCode(params.crewCode || "")
+    const cycleNumber = (params.cycleNumber || "").trim()
+    const startDate = (params.startDate || "").trim()
+    const endDate = (params.endDate || "").trim()
     if (!crewCode) {
       window.alert("Select a crew first.")
       return
     }
-    const draft = leavePatternSegmentDraft[cycleNumber] || { start: "", end: "" }
-    const startDate = (draft.start || "").trim()
-    const endDate = (draft.end || "").trim()
     if (!startDate || !endDate) {
       window.alert("Actual Leave Start and End are required.")
       return
     }
     if (endDate < startDate) {
       window.alert("Actual Leave End must be after or equal to Start.")
+      return
+    }
+    if (params.cycleLeaveStart && startDate < params.cycleLeaveStart) {
+      window.alert("Actual Leave Start is before this cycle leave start.")
+      return
+    }
+    if (params.cycleLeaveEnd && endDate > params.cycleLeaveEnd) {
+      window.alert("Actual Leave End is after this cycle leave end.")
       return
     }
     const entry: Entry = {
@@ -5504,6 +5667,17 @@ export default function Page() {
       plannedDays: String(getDateRangeInclusive(startDate, endDate).length),
     }
     setStore((prev) => ({ ...prev, crewLeavePlanner: [entry, ...prev.crewLeavePlanner] }))
+  }
+
+  const addLeavePatternActualSegment = (cycleNumber: string) => {
+    const crewCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+    const draft = leavePatternSegmentDraft[cycleNumber] || { start: "", end: "" }
+    addActualLeaveSegment({
+      crewCode,
+      cycleNumber,
+      startDate: draft.start || "",
+      endDate: draft.end || "",
+    })
     setLeavePatternSegmentDraft((prev) => ({ ...prev, [cycleNumber]: { start: "", end: "" } }))
   }
 
@@ -5514,6 +5688,95 @@ export default function Page() {
       crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== segmentId),
     }))
   }
+
+  const shiftLeaveBarAndNextWork = (
+    leaveBlockId: string,
+    deltaDays: number,
+  ): { crewCode: string; cycleNumber: string; leaveDeltaDays: number; nextWorkDeltaDays: number } | null => {
+    if (!leaveBlockId || !deltaDays) return null
+    let result: { crewCode: string; cycleNumber: string; leaveDeltaDays: number; nextWorkDeltaDays: number } | null = null
+    setStore((prev) => {
+      const rows = [...prev.crewLeavePlanner]
+      const leaveIdx = rows.findIndex((r) => r.id === leaveBlockId)
+      if (leaveIdx < 0) return prev
+      const leaveRow = rows[leaveIdx]
+      if ((leaveRow.recordType || "").trim().toLowerCase() !== "generatedblock") return prev
+      if ((leaveRow.blockType || "").trim().toLowerCase() !== "leave") return prev
+      const oldLeaveStart = (leaveRow.startDate || "").trim()
+      const oldLeaveEnd = (leaveRow.endDate || "").trim()
+      if (!oldLeaveStart || !oldLeaveEnd) return prev
+
+      const newLeaveStart = addDaysToYmd(oldLeaveStart, deltaDays)
+      const newLeaveEnd = addDaysToYmd(oldLeaveEnd, deltaDays)
+      rows[leaveIdx] = {
+        ...leaveRow,
+        originalStartDate: (leaveRow.originalStartDate || "").trim() || oldLeaveStart,
+        originalEndDate: (leaveRow.originalEndDate || "").trim() || oldLeaveEnd,
+        startDate: newLeaveStart,
+        endDate: newLeaveEnd,
+      }
+
+      const crewCode = normalizeCrewCode(leaveRow.crewCode || "")
+      const currentCycle = Number(leaveRow.cycleNumber || "0") || 0
+      const nextCycle = String(currentCycle + 1)
+      let nextWorkDeltaDays = 0
+
+      const nextWorkIdx = rows.findIndex((r) => {
+        if ((r.recordType || "").trim().toLowerCase() !== "generatedblock") return false
+        if ((r.blockType || "").trim().toLowerCase() !== "work") return false
+        if (normalizeCrewCode(r.crewCode || "") !== crewCode) return false
+        return (r.cycleNumber || "").trim() === nextCycle
+      })
+      if (nextWorkIdx >= 0) {
+        const nextWork = rows[nextWorkIdx]
+        const oldWorkStart = (nextWork.startDate || "").trim()
+        const oldWorkEnd = (nextWork.endDate || "").trim()
+        const workDays = Number(nextWork.plannedDays || "0") || getDateRangeInclusive(oldWorkStart, oldWorkEnd).length
+        const newWorkStart = addDaysToYmd(newLeaveEnd, 1)
+        const newWorkEnd = workDays > 0 ? addDaysToYmd(newWorkStart, workDays - 1) : newWorkStart
+        rows[nextWorkIdx] = {
+          ...nextWork,
+          originalStartDate: (nextWork.originalStartDate || "").trim() || oldWorkStart,
+          originalEndDate: (nextWork.originalEndDate || "").trim() || oldWorkEnd,
+          startDate: newWorkStart,
+          endDate: newWorkEnd,
+        }
+        nextWorkDeltaDays = deltaDays
+      }
+
+      result = {
+        crewCode,
+        cycleNumber: String(currentCycle),
+        leaveDeltaDays: deltaDays,
+        nextWorkDeltaDays,
+      }
+      return { ...prev, crewLeavePlanner: rows }
+    })
+    return result
+  }
+
+  const resetGeneratedCycleToOriginal = (crewCodeValue: string, cycleNumber: string) => {
+    const crewCode = normalizeCrewCode(crewCodeValue || "")
+    const cycle = (cycleNumber || "").trim()
+    if (!crewCode || !cycle) return
+    setStore((prev) => {
+      const nextRows = prev.crewLeavePlanner.map((row) => {
+        if ((row.recordType || "").trim().toLowerCase() !== "generatedblock") return row
+        if (normalizeCrewCode(row.crewCode || "") !== crewCode) return row
+        if ((row.cycleNumber || "").trim() !== cycle) return row
+        const originalStart = (row.originalStartDate || "").trim()
+        const originalEnd = (row.originalEndDate || "").trim()
+        if (!originalStart || !originalEnd) return row
+        return {
+          ...row,
+          startDate: originalStart,
+          endDate: originalEnd,
+        }
+      })
+      return { ...prev, crewLeavePlanner: nextRows }
+    })
+  }
+
 
   const openInactivePopup = ({
     staffId,
@@ -8898,7 +9161,31 @@ export default function Page() {
                                         <td>{formatYmdToDdMmYy(r.lpStart)}</td>
                                         <td>{formatYmdToDdMmYy(r.lpEnd)}</td>
                                         <td>{r.lpDays}</td>
-                                        <td className="fw-semibold">{r.rem}</td>
+                                        <td
+                                          className="fw-semibold text-primary"
+                                          style={{ cursor: "pointer", textDecoration: "underline" }}
+                                          onClick={() => {
+                                            const crewCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+                                            if (!crewCode) return
+                                            const leaveBlock =
+                                              leaveBlockByCrewCycle.get(`${crewCode}::${String(r.cycleNumber || "").trim()}`)
+                                            setLeaveDetailModal({
+                                              open: true,
+                                              blockId: leaveBlock?.id || "",
+                                              crewCode,
+                                              crewName: leaveBlock?.crewName || "",
+                                              cycleNumber: String(r.cycleNumber || "").trim(),
+                                              leaveStart: r.lpStart || "",
+                                              leaveEnd: r.lpEnd || "",
+                                              policyName: leaveBlock?.policyName || "",
+                                            })
+                                            setLeaveDetailSelectedCycle(String(r.cycleNumber || "").trim())
+                                            setLeaveDetailDraft({ start: r.lpStart || "", end: r.lpEnd || "" })
+                                          }}
+                                          title="Click to set Actual Leave Dates for this cycle"
+                                        >
+                                          {r.rem}
+                                        </td>
                                         <td>
                                           <div className="d-flex flex-column gap-1">
                                             {(leavePatternSegmentsByCycle.get(String(r.cycleNumber || "")) || []).map((s) => (
@@ -9810,6 +10097,74 @@ export default function Page() {
                                           <div
                                             key={block.id}
                                             title={`${(block.blockType || "").toUpperCase()} | ${start} to ${end}`}
+                                            onClick={() => {
+                                              if (Date.now() - lastLeaveBarDragAtRef.current < 220) return
+                                              if (leaveBarDragRef.current?.moved) return
+                                              if (!isLeave) return
+                                              setLeaveDetailModal({
+                                                open: true,
+                                                blockId: (block.id || "").trim(),
+                                                crewCode: normalizeCrewCode(block.crewCode || ""),
+                                                crewName: block.crewName || "",
+                                                cycleNumber: (block.cycleNumber || "").trim(),
+                                                leaveStart: start,
+                                                leaveEnd: end,
+                                                policyName: block.policyName || "",
+                                              })
+                                              setLeaveDetailSelectedCycle((block.cycleNumber || "").trim())
+                                              setLeaveDetailDraft({ start, end })
+                                            }}
+                                            onMouseDown={(e) => {
+                                              if (!isLeave) return
+                                              e.preventDefault()
+                                              e.stopPropagation()
+                                              const drag = {
+                                                blockId: (block.id || "").trim(),
+                                                startX: e.clientX,
+                                                moved: false,
+                                              }
+                                              leaveBarDragRef.current = drag
+                                              setDraggingLeaveBlockId((block.id || "").trim())
+                                              const onMove = (ev: MouseEvent) => {
+                                                if (!leaveBarDragRef.current) return
+                                                const dx = ev.clientX - leaveBarDragRef.current.startX
+                                                if (Math.abs(dx) > 4) leaveBarDragRef.current.moved = true
+                                              }
+                                              const onUp = (ev: MouseEvent) => {
+                                                const ref = leaveBarDragRef.current
+                                                leaveBarDragRef.current = null
+                                                setDraggingLeaveBlockId("")
+                                                window.removeEventListener("mousemove", onMove)
+                                                window.removeEventListener("mouseup", onUp)
+                                                if (!ref) return
+                                                const dx = ev.clientX - ref.startX
+                                                let deltaDays = Math.round(dx / crewLeaveTimelineDayWidth)
+                                                if (ref.moved && deltaDays === 0) deltaDays = dx >= 0 ? 1 : -1
+                                                if (!ref.moved || deltaDays === 0) return
+                                                const adj = shiftLeaveBarAndNextWork(ref.blockId, deltaDays)
+                                                lastLeaveBarDragAtRef.current = Date.now()
+                                                if (adj) {
+                                                  setLastLeaveBarAdjustment(adj)
+                                                  setLeaveDetailModal({
+                                                    open: true,
+                                                    blockId: (block.id || "").trim(),
+                                                    crewCode: normalizeCrewCode(block.crewCode || ""),
+                                                    crewName: block.crewName || "",
+                                                    cycleNumber: (block.cycleNumber || "").trim(),
+                                                    leaveStart: addDaysToYmd(start, deltaDays),
+                                                    leaveEnd: addDaysToYmd(end, deltaDays),
+                                                    policyName: block.policyName || "",
+                                                  })
+                                                  setLeaveDetailSelectedCycle((block.cycleNumber || "").trim())
+                                                  setLeaveDetailDraft({
+                                                    start: addDaysToYmd(start, deltaDays),
+                                                    end: addDaysToYmd(end, deltaDays),
+                                                  })
+                                                }
+                                              }
+                                              window.addEventListener("mousemove", onMove)
+                                              window.addEventListener("mouseup", onUp)
+                                            }}
                                             style={{
                                               position: "absolute",
                                               left: leftDays * crewLeaveTimelineDayWidth + 1,
@@ -9826,6 +10181,11 @@ export default function Page() {
                                               whiteSpace: "nowrap",
                                               overflow: "hidden",
                                               textOverflow: "ellipsis",
+                                              cursor: isLeave
+                                                ? draggingLeaveBlockId === (block.id || "").trim()
+                                                  ? "grabbing"
+                                                  : "grab"
+                                                : "default",
                                             }}
                                           >
                                             {(block.blockType || "").toUpperCase()} {start} → {end} ({spanDays}d)
@@ -10871,6 +11231,262 @@ export default function Page() {
                   </Button>
                   <Button onClick={submitActiveModule}>
                     {editingEntryId ? "Update Entry" : `Save ${activeConfig.title} Entry`}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {leaveDetailModal.open ? (
+        <>
+          <div className="app-modal-backdrop" style={{ zIndex: 1068 }} />
+          <div className="modal d-block" tabIndex={-1} role="dialog" style={{ zIndex: 1069 }}>
+            <div className="modal-dialog modal-xl modal-dialog-scrollable">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <h5 className="modal-title fw-semibold">
+                    Leave Details - {leaveDetailModal.crewCode}
+                    {leaveDetailModal.crewName ? ` | ${leaveDetailModal.crewName}` : ""}
+                  </h5>
+                  <button
+                    type="button"
+                    className="btn-close"
+                    aria-label="Close"
+                    onClick={() => {
+                      setLeaveDetailModal((p) => ({ ...p, open: false }))
+                      setLeaveDetailSelectedCycle("")
+                    }}
+                  />
+                </div>
+                <div className="modal-body d-flex flex-column gap-3">
+                  {lastLeaveBarAdjustment &&
+                  lastLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
+                  lastLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
+                    <div className="alert alert-warning py-2 small mb-0">
+                      Adjusted Days: Leave Pattern{" "}
+                      <strong>
+                        {lastLeaveBarAdjustment.leaveDeltaDays >= 0 ? "+" : ""}
+                        {lastLeaveBarAdjustment.leaveDeltaDays}
+                      </strong>
+                      {" | "}Next Work Pattern{" "}
+                      <strong>
+                        {lastLeaveBarAdjustment.nextWorkDeltaDays >= 0 ? "+" : ""}
+                        {lastLeaveBarAdjustment.nextWorkDeltaDays}
+                      </strong>
+                    </div>
+                  ) : null}
+                  <div className="card border">
+                    <div className="card-body py-2">
+                      <div className="row g-2 small">
+                        <div className="col-md-3"><strong>Cycle:</strong> {leaveDetailModal.cycleNumber || "-"}</div>
+                        <div className="col-md-3"><strong>Rotation:</strong> {leaveDetailModal.policyName || "-"}</div>
+                        <div className="col-md-3"><strong>Leave Start:</strong> {leaveDetailModal.leaveStart || "-"}</div>
+                        <div className="col-md-3"><strong>Leave End:</strong> {leaveDetailModal.leaveEnd || "-"}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card border">
+                    <div className="card-header py-2 small fw-semibold">Set Actual Leave (Mapped to this leave cycle)</div>
+                    <div className="card-body">
+                      <div className="row g-3 align-items-end">
+                        <div className="col-12 col-md-4">
+                          <label className="form-label small fw-semibold">Cycle</label>
+                          <select
+                            className="form-select form-select-sm"
+                            value={leaveDetailActiveCycleNumber}
+                            onChange={(e) => {
+                              const nextCycle = e.target.value
+                              setLeaveDetailSelectedCycle(nextCycle)
+                              const row = leaveDetailPatternRows.find((r) => (r.cycleNumber || "").trim() === nextCycle)
+                              const remBase = Number(row?.rem || "0") || 0
+                              const cycleStart = (row?.lpStart || "").trim()
+                              const autoEnd =
+                                cycleStart && remBase > 0 ? addDaysToYmd(cycleStart, Math.max(remBase - 1, 0)) : cycleStart
+                              setLeaveDetailDraft({ start: cycleStart, end: autoEnd })
+                            }}
+                          >
+                            {leaveDetailPatternRows.map((r) => (
+                              <option key={r.id} value={r.cycleNumber}>
+                                {r.cycleLabel}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="small text-muted mt-1">
+                            <span className="text-muted">REM / Leave Balance: </span>
+                            <strong>{leaveDetailCycleRemainingDays}</strong>
+                          </div>
+                        </div>
+                        <div className="col-12 col-md-4">
+                          <label className="form-label small fw-semibold">Actual Leave Start</label>
+                          <input
+                            type="date"
+                            className="form-control form-control-sm"
+                            value={leaveDetailDraft.start}
+                            onChange={(e) => {
+                              const start = e.target.value
+                              const autoEnd =
+                                start && leaveDetailCycleRemainingDays > 0
+                                  ? addDaysToYmd(start, Math.max(leaveDetailCycleRemainingDays - 1, 0))
+                                  : start
+                              setLeaveDetailDraft({ start, end: autoEnd })
+                            }}
+                          />
+                        </div>
+                        <div className="col-12 col-md-4">
+                          <label className="form-label small fw-semibold">Actual Leave End</label>
+                          <input
+                            type="date"
+                            className="form-control form-control-sm"
+                            value={leaveDetailDraft.end}
+                            readOnly
+                          />
+                          <div className="small text-muted mt-1">
+                            Auto-calculated from Start + REM ({leaveDetailCycleRemainingDays} day
+                            {leaveDetailCycleRemainingDays === 1 ? "" : "s"})
+                          </div>
+                        </div>
+                        <div className="col-12 d-flex justify-content-end">
+                          <Button
+                            onClick={() =>
+                              addActualLeaveSegment({
+                                crewCode: leaveDetailModal.crewCode,
+                                cycleNumber: leaveDetailActiveCycleNumber,
+                                startDate: leaveDetailDraft.start,
+                                endDate: leaveDetailDraft.end,
+                                cycleLeaveStart: leaveDetailActiveCycleRow?.lpStart || "",
+                                cycleLeaveEnd: leaveDetailActiveCycleRow?.lpEnd || "",
+                              })
+                            }
+                          >
+                            Save Actual Leave Segment
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-3">
+                        <div className="small fw-semibold mb-1">Saved Segments (this cycle)</div>
+                        <div className="d-flex flex-column gap-1">
+                          {leaveDetailSegmentsForActiveCycle.length ? (
+                            leaveDetailSegmentsForActiveCycle.map((s) => (
+                              <div key={s.id} className="d-flex align-items-center justify-content-between border rounded px-2 py-1">
+                                <span>
+                                  {formatYmdToDdMmYy(s.startDate || "")} - {formatYmdToDdMmYy(s.endDate || "")} ({s.plannedDays || "0"}d)
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-link text-danger p-0"
+                                  onClick={() => removeLeavePatternActualSegment(s.id)}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="small text-muted">No actual leave segments yet.</div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card border">
+                    <div className="card-header py-2 small fw-semibold">Leave Pattern Manager View (Crew)</div>
+                    <div className="card-body p-0">
+                      <div style={{ maxHeight: 320, overflow: "auto" }}>
+                        <table className="table table-sm mb-0 align-middle">
+                          <thead>
+                            <tr>
+                              <th rowSpan={2} style={{ minWidth: 90, background: "#f8fafc" }}>Cycle</th>
+                              <th colSpan={4} className="text-center" style={{ background: "#dbeafe", color: "#1e3a8a" }}>Work Pattern</th>
+                              <th colSpan={4} className="text-center" style={{ background: "#dcfce7", color: "#166534" }}>Leave Pattern</th>
+                            </tr>
+                            <tr>
+                              <th style={{ minWidth: 120 }}>Start</th>
+                              <th style={{ minWidth: 120 }}>End</th>
+                              <th style={{ minWidth: 100 }}>No of Days</th>
+                              <th style={{ minWidth: 90 }}>Adjust</th>
+                              <th style={{ minWidth: 120 }}>Start</th>
+                              <th style={{ minWidth: 120 }}>End</th>
+                              <th style={{ minWidth: 100 }}>No of Days</th>
+                              <th style={{ minWidth: 90 }}>REM</th>
+                              <th style={{ minWidth: 110 }}>Reset</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {leaveDetailPatternRows.length ? (
+                              leaveDetailPatternRows.map((r) => (
+                                <tr
+                                  key={r.id}
+                                  className={(r.cycleNumber || "").trim() === leaveDetailActiveCycleNumber ? "table-warning" : ""}
+                                >
+                                  <td className="fw-semibold">{r.cycleLabel}</td>
+                                  <td>{formatYmdToDdMmYy(r.wpStart)}</td>
+                                  <td>{formatYmdToDdMmYy(r.wpEnd)}</td>
+                                  <td>{r.wpDays}</td>
+                                  <td className={Number(r.adjust || "0") > 0 ? "text-danger fw-semibold" : ""}>
+                                    {(() => {
+                                      const w = diffDaysYmd(r.wpOriginalStart || "", r.wpStart || "")
+                                      const l = diffDaysYmd(r.lpOriginalStart || "", r.lpStart || "")
+                                      const wpAdj = Number.isFinite(w) ? w : 0
+                                      const lpAdj = Number.isFinite(l) ? l : 0
+                                      return `W${wpAdj >= 0 ? "+" : ""}${wpAdj} | L${lpAdj >= 0 ? "+" : ""}${lpAdj}`
+                                    })()}
+                                  </td>
+                                  <td>{formatYmdToDdMmYy(r.lpStart)}</td>
+                                  <td>{formatYmdToDdMmYy(r.lpEnd)}</td>
+                                  <td>{r.lpDays}</td>
+                                  <td className="fw-semibold">{r.rem}</td>
+                                  <td>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() =>
+                                        resetGeneratedCycleToOriginal(
+                                          leaveDetailModal.crewCode,
+                                          String(r.cycleNumber || "").trim(),
+                                        )
+                                      }
+                                    >
+                                      Reset
+                                    </Button>
+                                  </td>
+                                </tr>
+                              ))
+                            ) : (
+                              <tr>
+                                <td colSpan={10} className="text-muted">No generated leave pattern rows for this crew.</td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  {lastLeaveBarAdjustment &&
+                  lastLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
+                  lastLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        resetGeneratedCycleToOriginal(leaveDetailModal.crewCode, leaveDetailActiveCycleNumber)
+                        setLastLeaveBarAdjustment(null)
+                      }}
+                    >
+                      Cancel Last Drag
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setLeaveDetailModal((p) => ({ ...p, open: false }))
+                      setLeaveDetailSelectedCycle("")
+                    }}
+                  >
+                    Close
                   </Button>
                 </div>
               </div>
