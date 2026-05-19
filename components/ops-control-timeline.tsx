@@ -529,6 +529,9 @@ async function parseExcelFile(file: File): Promise<{
   flights: Omit<FlightEntry, "id" | "createdAt" | "scheduleDate">[]
   warnings: string[]
   detectedScheduleDate: string | null
+  detectedReleaseBy: string | null
+  detectedReleaseTime: string | null
+  detectedReleaseVersion: string | null
 }> {
   await loadSheetJs()
   const w = window as SheetJSWindow
@@ -552,7 +555,41 @@ async function parseExcelFile(file: File): Promise<{
     defval: "",
   }) as unknown[][]
   const parsed = parseSchedule(rows)
-  return { ...parsed, detectedScheduleDate: extractScheduleDate(rows) }
+  const extractMetaValue = (keys: string[]): string | null => {
+    const topRows = Math.min(rows.length, 16)
+    for (let r = 0; r < topRows; r++) {
+      const row = rows[r] || []
+      for (let c = 0; c < row.length; c++) {
+        const cell = String(row[c] ?? "").trim()
+        if (!cell) continue
+        const upper = cell.toUpperCase()
+        const matched = keys.some((k) => upper.includes(k))
+        if (!matched) continue
+        const inline = cell.split(":").slice(1).join(":").trim()
+        if (inline) return inline
+        const right = String(row[c + 1] ?? "").trim()
+        if (right) return right
+      }
+    }
+    return null
+  }
+  const normalizeTimeMeta = (value: string | null): string | null => {
+    if (!value) return null
+    const t = formatTimeCell(value)
+    if (parseTimeToMin(t) != null) return t
+    const m = value.match(/\b(\d{1,2}):(\d{2})\b/)
+    if (m) return `${pad2(Number(m[1]))}:${m[2]}`
+    return null
+  }
+  return {
+    ...parsed,
+    detectedScheduleDate: extractScheduleDate(rows),
+    detectedReleaseBy: extractMetaValue(["RELEASE BY", "RELEASED BY", "PREPARED BY"]),
+    detectedReleaseTime: normalizeTimeMeta(
+      extractMetaValue(["RELEASE TIME", "TIME RELEASED", "ISSUE TIME", "TIME"]),
+    ),
+    detectedReleaseVersion: extractMetaValue(["RELEASE VERSION", "VERSION", "REVISION", "REV"]),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +608,10 @@ export default function OpsControlTimeline(props: {
     fileName: string
     count: number
     at: string
+    releaseVersion: string
+    releaseBy: string
+    releaseTime: string
+    isInitial: boolean
   } | null>(null)
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
   const [scheduleDate, setScheduleDate] = useState<string>(() => {
@@ -591,6 +632,13 @@ export default function OpsControlTimeline(props: {
 
   // Show / hide crew codes on flight bars.
   const [showCrew, setShowCrew] = useState(true)
+  const [releaseVersion, setReleaseVersion] = useState("Initial")
+  const [releaseBy, setReleaseBy] = useState("")
+  const [releaseTime, setReleaseTime] = useState(() => {
+    const d = new Date()
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  })
+  const [isInitialSchedule, setIsInitialSchedule] = useState(false)
 
   // Drag-and-drop: when a bar is dropped we open a confirmation dialog
   // showing the target's existing schedule, the new STD/STA after the
@@ -642,6 +690,9 @@ export default function OpsControlTimeline(props: {
         flights: parsed,
         warnings: warns,
         detectedScheduleDate,
+        detectedReleaseBy,
+        detectedReleaseTime,
+        detectedReleaseVersion,
       } = await parseExcelFile(file)
       if (parsed.length === 0) {
         setErrorMsg(
@@ -652,6 +703,15 @@ export default function OpsControlTimeline(props: {
       if (detectedScheduleDate && detectedScheduleDate !== scheduleDate) {
         setErrorMsg(
           `Schedule date mismatch. Selected date is ${scheduleDate}, but file date is ${detectedScheduleDate}.`,
+        )
+        return
+      }
+      const resolvedReleaseBy = (detectedReleaseBy || releaseBy).trim()
+      const resolvedReleaseTime = (detectedReleaseTime || releaseTime).trim()
+      const resolvedReleaseVersion = (detectedReleaseVersion || releaseVersion || "Initial").trim()
+      if (!resolvedReleaseBy || !resolvedReleaseTime) {
+        setErrorMsg(
+          "Could not find Release By/Release Time in sheet. Please fill them in the import popup and try again.",
         )
         return
       }
@@ -668,7 +728,14 @@ export default function OpsControlTimeline(props: {
         fileName: file.name,
         count: entries.length,
         at: new Date().toLocaleTimeString(),
+        releaseVersion: resolvedReleaseVersion,
+        releaseBy: resolvedReleaseBy,
+        releaseTime: resolvedReleaseTime,
+        isInitial: isInitialSchedule,
       })
+      setReleaseBy(resolvedReleaseBy)
+      setReleaseTime(resolvedReleaseTime)
+      setReleaseVersion(resolvedReleaseVersion)
       setIsImportModalOpen(false)
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err))
@@ -679,14 +746,33 @@ export default function OpsControlTimeline(props: {
 
   const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) void handleFile(file)
+    if (file) {
+      const today = new Date()
+      const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
+      if (scheduleDate > todayKey && !isInitialSchedule) {
+        setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
+        e.currentTarget.value = ""
+        return
+      }
+      setErrorMsg(null)
+      void handleFile(file)
+    }
     e.currentTarget.value = ""
   }
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     const file = e.dataTransfer?.files?.[0]
-    if (file) void handleFile(file)
+    if (file) {
+      const today = new Date()
+      const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
+      if (scheduleDate > todayKey && !isInitialSchedule) {
+        setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
+        return
+      }
+      setErrorMsg(null)
+      void handleFile(file)
+    }
   }
 
   // ----- group + frame for timeline -----
@@ -1137,11 +1223,14 @@ export default function OpsControlTimeline(props: {
             </div>
           ) : null}
           {lastImported ? (
-            <div className="alert alert-success small d-flex align-items-start gap-2 mt-3 mb-0">
+              <div className="alert alert-success small d-flex align-items-start gap-2 mt-3 mb-0">
               <CheckCircle2 size={16} className="mt-1" />
               <div>
                 Imported {lastImported.count} flight legs from{" "}
-                <strong>{lastImported.fileName}</strong> at {lastImported.at}.
+                <strong>{lastImported.fileName}</strong> at {lastImported.at}. Release:{" "}
+                <strong>{lastImported.releaseVersion}</strong> · {lastImported.releaseTime} ·{" "}
+                {lastImported.releaseBy}
+                {lastImported.isInitial ? " · Initial schedule" : ""}
               </div>
             </div>
           ) : null}
@@ -1173,6 +1262,51 @@ export default function OpsControlTimeline(props: {
                     value={scheduleDate}
                     onChange={(e) => setScheduleDate(e.target.value)}
                   />
+                </div>
+                <div className="row g-2 mb-3">
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">Release version</label>
+                    <input
+                      type="text"
+                      className="form-control form-control-sm"
+                      value={releaseVersion}
+                      onChange={(e) => setReleaseVersion(e.target.value)}
+                      placeholder="Initial / Rev1"
+                    />
+                  </div>
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">Release time</label>
+                    <input
+                      type="time"
+                      className="form-control form-control-sm"
+                      value={releaseTime}
+                      onChange={(e) => setReleaseTime(e.target.value)}
+                    />
+                  </div>
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">Release by</label>
+                    <input
+                      type="text"
+                      className="form-control form-control-sm"
+                      value={releaseBy}
+                      onChange={(e) => setReleaseBy(e.target.value)}
+                      placeholder="Controller name"
+                    />
+                  </div>
+                  <div className="col-12">
+                    <label className="d-flex align-items-center gap-2 small fw-semibold mb-0">
+                      <input
+                        type="checkbox"
+                        className="form-check-input mt-0"
+                        checked={isInitialSchedule}
+                        onChange={(e) => setIsInitialSchedule(e.target.checked)}
+                      />
+                      Initial schedule
+                    </label>
+                    <div className="text-muted small mt-1">
+                      For future schedule dates (e.g., tomorrow), Initial schedule must be enabled before import.
+                    </div>
+                  </div>
                 </div>
                 <div
                   onDragOver={(e) => e.preventDefault()}
@@ -1315,7 +1449,7 @@ export default function OpsControlTimeline(props: {
           </div>
         )
         return (
-          <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
+          <div className="card border-0 shadow-sm" style={{ borderRadius: 12, order: 3 }}>
             <div className="card-body">
               <div className="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
                 <h2 className="h6 fw-semibold mb-0 d-flex align-items-center gap-2">
@@ -1651,7 +1785,7 @@ export default function OpsControlTimeline(props: {
       })() : null}
 
       {/* ----- Timeline ----- */}
-      <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
+      <div className="card border-0 shadow-sm" style={{ borderRadius: 12, order: 2 }}>
         <div className="card-body">
           <div className="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
             <h2 className="h6 fw-semibold mb-0 d-flex align-items-center gap-2">

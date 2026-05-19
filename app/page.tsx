@@ -29,6 +29,7 @@ import {
   UserCog,
   UserPlus,
   Users,
+  LogOut,
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -1471,6 +1472,16 @@ export default function Page() {
     cycleNumber: string
     leaveDeltaDays: number
     nextWorkDeltaDays: number
+  } | null>(null)
+  const [pendingLeaveBarAdjustment, setPendingLeaveBarAdjustment] = useState<{
+    blockId: string
+    crewCode: string
+    crewName: string
+    cycleNumber: string
+    policyName: string
+    leaveStart: string
+    leaveEnd: string
+    deltaDays: number
   } | null>(null)
   const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
     code: "MC",
@@ -7813,6 +7824,52 @@ export default function Page() {
                 </button>
               )
             })}
+            <div className="mt-auto d-flex flex-column align-items-center gap-2 pb-2">
+              <button
+                type="button"
+                className="btn btn-sm app-rail__btn d-inline-flex align-items-center justify-content-center"
+                title={
+                  authenticatedUser?.fullName ||
+                  authenticatedUser?.userName ||
+                  authenticatedStaff?.fullName ||
+                  authenticatedStaff?.staffNo ||
+                  "User"
+                }
+                aria-label="Current user"
+              >
+                <User size={18} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm app-rail__btn d-inline-flex align-items-center justify-content-center"
+                title={`Sync: ${syncInfo.label}`}
+                aria-label={`Sync status ${syncInfo.label}`}
+              >
+                <Activity
+                  size={18}
+                  aria-hidden="true"
+                  color={
+                    syncStatus === "error"
+                      ? "#dc3545"
+                      : syncStatus === "saving" || syncStatus === "loading"
+                      ? "#f59f00"
+                      : "#198754"
+                  }
+                />
+              </button>
+              <div title="Toggle theme" aria-label="Toggle theme">
+                <ThemeToggle />
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm app-rail__btn d-inline-flex align-items-center justify-content-center"
+                title="Logout"
+                aria-label="Logout"
+                onClick={logout}
+              >
+                <LogOut size={18} aria-hidden="true" />
+              </button>
+            </div>
           </div>
           {openGroupTitle ? (
             <div className="app-submenu p-3 flex-grow-1">
@@ -7859,40 +7916,19 @@ export default function Page() {
           style={{ overflowX: "hidden" }}
           onClick={() => setOpenGroupTitle(null)}
         >
-          <header className="position-sticky top-0 bg-body border-bottom px-3 px-md-4 py-3 d-flex align-items-center justify-content-between gap-3" style={{ zIndex: 10 }}>
-            <div className="d-flex align-items-center gap-2 min-w-0">
+          <div className="flex-grow-1 p-3 p-md-4" style={{ overflowX: "hidden" }}>
+            <div className="d-flex d-lg-none align-items-center justify-content-between mb-3">
               <button
                 type="button"
-                className="btn btn-sm btn-outline-secondary d-lg-none"
+                className="btn btn-sm btn-outline-secondary"
                 onClick={() => setIsSidebarOpen((v) => !v)}
                 aria-label="Toggle navigation"
                 aria-expanded={isSidebarOpen}
               >
                 <span aria-hidden="true">&#9776;</span>
               </button>
-              <div className="min-w-0">
-                <div className="text-uppercase fw-semibold text-primary" style={{ fontSize: "0.7rem", letterSpacing: "0.08em" }}>
-                  Operations Command Center
-                </div>
-                <h1 className="h5 mb-0 fw-semibold text-truncate">{activeConfig.title}</h1>
-              </div>
+              <div className="small text-muted text-truncate">{activeConfig.title}</div>
             </div>
-            <div className="d-flex align-items-center gap-2">
-              <span className="small text-muted d-none d-md-inline">
-                {authenticatedUser?.fullName || authenticatedUser?.userName || authenticatedStaff?.fullName || authenticatedStaff?.staffNo || "User"}
-              </span>
-              <Button variant="outline" size="sm" onClick={logout}>
-                Logout
-              </Button>
-              <span className={"badge rounded-pill " + syncInfo.cls}>
-                <span className="me-1">●</span>
-                {syncInfo.label}
-              </span>
-              <ThemeToggle />
-            </div>
-          </header>
-
-          <div className="flex-grow-1 p-3 p-md-4" style={{ overflowX: "hidden" }}>
             {activeConfig.key === "dashboard" ? (
             <div className="row g-3 mb-4">
               {dashboardStats.map((stat) => (
@@ -10141,26 +10177,31 @@ export default function Page() {
                                                 let deltaDays = Math.round(dx / crewLeaveTimelineDayWidth)
                                                 if (ref.moved && deltaDays === 0) deltaDays = dx >= 0 ? 1 : -1
                                                 if (!ref.moved || deltaDays === 0) return
-                                                const adj = shiftLeaveBarAndNextWork(ref.blockId, deltaDays)
-                                                lastLeaveBarDragAtRef.current = Date.now()
-                                                if (adj) {
-                                                  setLastLeaveBarAdjustment(adj)
-                                                  setLeaveDetailModal({
-                                                    open: true,
-                                                    blockId: (block.id || "").trim(),
-                                                    crewCode: normalizeCrewCode(block.crewCode || ""),
-                                                    crewName: block.crewName || "",
-                                                    cycleNumber: (block.cycleNumber || "").trim(),
-                                                    leaveStart: addDaysToYmd(start, deltaDays),
-                                                    leaveEnd: addDaysToYmd(end, deltaDays),
-                                                    policyName: block.policyName || "",
-                                                  })
-                                                  setLeaveDetailSelectedCycle((block.cycleNumber || "").trim())
-                                                  setLeaveDetailDraft({
-                                                    start: addDaysToYmd(start, deltaDays),
-                                                    end: addDaysToYmd(end, deltaDays),
-                                                  })
-                                                }
+                                                setPendingLeaveBarAdjustment({
+                                                  blockId: ref.blockId,
+                                                  crewCode: normalizeCrewCode(block.crewCode || ""),
+                                                  crewName: block.crewName || "",
+                                                  cycleNumber: (block.cycleNumber || "").trim(),
+                                                  policyName: block.policyName || "",
+                                                  leaveStart: addDaysToYmd(start, deltaDays),
+                                                  leaveEnd: addDaysToYmd(end, deltaDays),
+                                                  deltaDays,
+                                                })
+                                                setLeaveDetailModal({
+                                                  open: true,
+                                                  blockId: (block.id || "").trim(),
+                                                  crewCode: normalizeCrewCode(block.crewCode || ""),
+                                                  crewName: block.crewName || "",
+                                                  cycleNumber: (block.cycleNumber || "").trim(),
+                                                  leaveStart: addDaysToYmd(start, deltaDays),
+                                                  leaveEnd: addDaysToYmd(end, deltaDays),
+                                                  policyName: block.policyName || "",
+                                                })
+                                                setLeaveDetailSelectedCycle((block.cycleNumber || "").trim())
+                                                setLeaveDetailDraft({
+                                                  start: addDaysToYmd(start, deltaDays),
+                                                  end: addDaysToYmd(end, deltaDays),
+                                                })
                                               }
                                               window.addEventListener("mousemove", onMove)
                                               window.addEventListener("mouseup", onUp)
@@ -11257,6 +11298,7 @@ export default function Page() {
                     onClick={() => {
                       setLeaveDetailModal((p) => ({ ...p, open: false }))
                       setLeaveDetailSelectedCycle("")
+                      setPendingLeaveBarAdjustment(null)
                     }}
                   />
                 </div>
@@ -11277,6 +11319,18 @@ export default function Page() {
                       </strong>
                     </div>
                   ) : null}
+                  {pendingLeaveBarAdjustment &&
+                  pendingLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
+                  pendingLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
+                    <div className="alert alert-info py-2 small mb-0">
+                      Pending Drag Adjustment: Leave Pattern{" "}
+                      <strong>
+                        {pendingLeaveBarAdjustment.deltaDays >= 0 ? "+" : ""}
+                        {pendingLeaveBarAdjustment.deltaDays}
+                      </strong>
+                      {" day(s). Use Apply Drag Adjustment to confirm."}
+                    </div>
+                  ) : null}
                   <div className="card border">
                     <div className="card-body py-2">
                       <div className="row g-2 small">
@@ -11291,11 +11345,12 @@ export default function Page() {
                   <div className="card border">
                     <div className="card-header py-2 small fw-semibold">Set Actual Leave (Mapped to this leave cycle)</div>
                     <div className="card-body">
-                      <div className="row g-3 align-items-end">
-                        <div className="col-12 col-md-4">
+                      <div className="row g-2 align-items-start">
+                        <div className="col-12 col-md-3 d-flex flex-column">
                           <label className="form-label small fw-semibold">Cycle</label>
                           <select
                             className="form-select form-select-sm"
+                            style={{ maxWidth: 220 }}
                             value={leaveDetailActiveCycleNumber}
                             onChange={(e) => {
                               const nextCycle = e.target.value
@@ -11314,16 +11369,17 @@ export default function Page() {
                               </option>
                             ))}
                           </select>
-                          <div className="small text-muted mt-1">
+                          <div className="small text-muted mt-1" style={{ minHeight: 18 }}>
                             <span className="text-muted">REM / Leave Balance: </span>
                             <strong>{leaveDetailCycleRemainingDays}</strong>
                           </div>
                         </div>
-                        <div className="col-12 col-md-4">
+                        <div className="col-12 col-md-3 d-flex flex-column">
                           <label className="form-label small fw-semibold">Actual Leave Start</label>
                           <input
                             type="date"
                             className="form-control form-control-sm"
+                            style={{ maxWidth: 220 }}
                             value={leaveDetailDraft.start}
                             onChange={(e) => {
                               const start = e.target.value
@@ -11334,21 +11390,23 @@ export default function Page() {
                               setLeaveDetailDraft({ start, end: autoEnd })
                             }}
                           />
+                          <div style={{ minHeight: 18 }} />
                         </div>
-                        <div className="col-12 col-md-4">
+                        <div className="col-12 col-md-3 d-flex flex-column">
                           <label className="form-label small fw-semibold">Actual Leave End</label>
                           <input
                             type="date"
                             className="form-control form-control-sm"
+                            style={{ maxWidth: 220 }}
                             value={leaveDetailDraft.end}
                             readOnly
                           />
-                          <div className="small text-muted mt-1">
+                          <div className="small text-muted mt-1" style={{ minHeight: 18 }}>
                             Auto-calculated from Start + REM ({leaveDetailCycleRemainingDays} day
                             {leaveDetailCycleRemainingDays === 1 ? "" : "s"})
                           </div>
                         </div>
-                        <div className="col-12 d-flex justify-content-end">
+                        <div className="col-12 col-md-3 d-flex justify-content-md-end align-items-start pt-4">
                           <Button
                             onClick={() =>
                               addActualLeaveSegment({
@@ -11395,23 +11453,23 @@ export default function Page() {
                     <div className="card-header py-2 small fw-semibold">Leave Pattern Manager View (Crew)</div>
                     <div className="card-body p-0">
                       <div style={{ maxHeight: 320, overflow: "auto" }}>
-                        <table className="table table-sm mb-0 align-middle">
+                        <table className="table table-sm mb-0 align-middle" style={{ fontSize: 11 }}>
                           <thead>
                             <tr>
-                              <th rowSpan={2} style={{ minWidth: 90, background: "#f8fafc" }}>Cycle</th>
-                              <th colSpan={4} className="text-center" style={{ background: "#dbeafe", color: "#1e3a8a" }}>Work Pattern</th>
-                              <th colSpan={4} className="text-center" style={{ background: "#dcfce7", color: "#166534" }}>Leave Pattern</th>
+                              <th rowSpan={2} style={{ minWidth: 78, background: "#f8fafc", padding: "4px 6px" }}>Cycle</th>
+                              <th colSpan={4} className="text-center" style={{ background: "#dbeafe", color: "#1e3a8a", padding: "4px 6px" }}>Work Pattern</th>
+                              <th colSpan={4} className="text-center" style={{ background: "#dcfce7", color: "#166534", padding: "4px 6px" }}>Leave Pattern</th>
                             </tr>
                             <tr>
-                              <th style={{ minWidth: 120 }}>Start</th>
-                              <th style={{ minWidth: 120 }}>End</th>
-                              <th style={{ minWidth: 100 }}>No of Days</th>
-                              <th style={{ minWidth: 90 }}>Adjust</th>
-                              <th style={{ minWidth: 120 }}>Start</th>
-                              <th style={{ minWidth: 120 }}>End</th>
-                              <th style={{ minWidth: 100 }}>No of Days</th>
-                              <th style={{ minWidth: 90 }}>REM</th>
-                              <th style={{ minWidth: 110 }}>Reset</th>
+                              <th style={{ minWidth: 104, padding: "4px 6px" }}>Start</th>
+                              <th style={{ minWidth: 104, padding: "4px 6px" }}>End</th>
+                              <th style={{ minWidth: 78, padding: "4px 6px" }}>No of Days</th>
+                              <th style={{ minWidth: 112, padding: "4px 6px" }}>Adjust</th>
+                              <th style={{ minWidth: 104, padding: "4px 6px" }}>Start</th>
+                              <th style={{ minWidth: 104, padding: "4px 6px" }}>End</th>
+                              <th style={{ minWidth: 78, padding: "4px 6px" }}>No of Days</th>
+                              <th style={{ minWidth: 70, padding: "4px 6px" }}>REM</th>
+                              <th style={{ minWidth: 92, padding: "4px 6px" }}>Reset</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -11426,13 +11484,65 @@ export default function Page() {
                                   <td>{formatYmdToDdMmYy(r.wpEnd)}</td>
                                   <td>{r.wpDays}</td>
                                   <td className={Number(r.adjust || "0") > 0 ? "text-danger fw-semibold" : ""}>
-                                    {(() => {
-                                      const w = diffDaysYmd(r.wpOriginalStart || "", r.wpStart || "")
-                                      const l = diffDaysYmd(r.lpOriginalStart || "", r.lpStart || "")
-                                      const wpAdj = Number.isFinite(w) ? w : 0
-                                      const lpAdj = Number.isFinite(l) ? l : 0
-                                      return `W${wpAdj >= 0 ? "+" : ""}${wpAdj} | L${lpAdj >= 0 ? "+" : ""}${lpAdj}`
-                                    })()}
+                                    <div className="d-flex align-items-center gap-2">
+                                      <div>
+                                        {(() => {
+                                          const w = diffDaysYmd(r.wpOriginalStart || "", r.wpStart || "")
+                                          const l = diffDaysYmd(r.lpOriginalStart || "", r.lpStart || "")
+                                          const wpAdj = Number.isFinite(w) ? w : 0
+                                          const lpAdj = Number.isFinite(l) ? l : 0
+                                          return `W${wpAdj >= 0 ? "+" : ""}${wpAdj} | L${lpAdj >= 0 ? "+" : ""}${lpAdj}`
+                                        })()}
+                                      </div>
+                                      <div className="btn-group btn-group-sm" role="group" aria-label="Cycle adjustment">
+                                        <button
+                                          type="button"
+                                          className="btn btn-outline-secondary"
+                                          title="Shift leave -1 day"
+                                          onClick={() => {
+                                            const key = `${normalizeCrewCode(leaveDetailModal.crewCode || "")}::${String(r.cycleNumber || "").trim()}`
+                                            const leaveBlock = leaveBlockByCrewCycle.get(key)
+                                            if (!leaveBlock) return
+                                            setLeaveDetailSelectedCycle(String(r.cycleNumber || "").trim())
+                                            setPendingLeaveBarAdjustment({
+                                              blockId: (leaveBlock.id || "").trim(),
+                                              crewCode: normalizeCrewCode(leaveDetailModal.crewCode || ""),
+                                              crewName: leaveDetailModal.crewName || "",
+                                              cycleNumber: String(r.cycleNumber || "").trim(),
+                                              policyName: leaveDetailModal.policyName || "",
+                                              leaveStart: addDaysToYmd(r.lpStart || "", -1),
+                                              leaveEnd: addDaysToYmd(r.lpEnd || "", -1),
+                                              deltaDays: -1,
+                                            })
+                                          }}
+                                        >
+                                          -
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-outline-secondary"
+                                          title="Shift leave +1 day"
+                                          onClick={() => {
+                                            const key = `${normalizeCrewCode(leaveDetailModal.crewCode || "")}::${String(r.cycleNumber || "").trim()}`
+                                            const leaveBlock = leaveBlockByCrewCycle.get(key)
+                                            if (!leaveBlock) return
+                                            setLeaveDetailSelectedCycle(String(r.cycleNumber || "").trim())
+                                            setPendingLeaveBarAdjustment({
+                                              blockId: (leaveBlock.id || "").trim(),
+                                              crewCode: normalizeCrewCode(leaveDetailModal.crewCode || ""),
+                                              crewName: leaveDetailModal.crewName || "",
+                                              cycleNumber: String(r.cycleNumber || "").trim(),
+                                              policyName: leaveDetailModal.policyName || "",
+                                              leaveStart: addDaysToYmd(r.lpStart || "", 1),
+                                              leaveEnd: addDaysToYmd(r.lpEnd || "", 1),
+                                              deltaDays: 1,
+                                            })
+                                          }}
+                                        >
+                                          +
+                                        </button>
+                                      </div>
+                                    </div>
                                   </td>
                                   <td>{formatYmdToDdMmYy(r.lpStart)}</td>
                                   <td>{formatYmdToDdMmYy(r.lpEnd)}</td>
@@ -11466,6 +11576,32 @@ export default function Page() {
                   </div>
                 </div>
                 <div className="modal-footer">
+                  {pendingLeaveBarAdjustment &&
+                  pendingLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
+                  pendingLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
+                    <Button
+                      onClick={() => {
+                        const adj = shiftLeaveBarAndNextWork(
+                          pendingLeaveBarAdjustment.blockId,
+                          pendingLeaveBarAdjustment.deltaDays,
+                        )
+                        if (adj) {
+                          setLastLeaveBarAdjustment(adj)
+                          lastLeaveBarDragAtRef.current = Date.now()
+                        }
+                        setPendingLeaveBarAdjustment(null)
+                      }}
+                    >
+                      Apply Drag Adjustment
+                    </Button>
+                  ) : null}
+                  {pendingLeaveBarAdjustment &&
+                  pendingLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
+                  pendingLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
+                    <Button variant="outline" onClick={() => setPendingLeaveBarAdjustment(null)}>
+                      Cancel Pending Drag
+                    </Button>
+                  ) : null}
                   {lastLeaveBarAdjustment &&
                   lastLeaveBarAdjustment.crewCode === normalizeCrewCode(leaveDetailModal.crewCode || "") &&
                   lastLeaveBarAdjustment.cycleNumber === leaveDetailActiveCycleNumber ? (
@@ -11484,6 +11620,7 @@ export default function Page() {
                     onClick={() => {
                       setLeaveDetailModal((p) => ({ ...p, open: false }))
                       setLeaveDetailSelectedCycle("")
+                      setPendingLeaveBarAdjustment(null)
                     }}
                   >
                     Close

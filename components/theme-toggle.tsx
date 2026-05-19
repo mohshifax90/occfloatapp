@@ -18,14 +18,13 @@ function ThemeToggle({ className }: { className?: string }) {
       type="button"
       onClick={() => setTheme(isDark ? "light" : "dark")}
       className={
-        "btn btn-sm btn-outline-secondary d-inline-flex align-items-center gap-2" +
+        "btn btn-sm btn-outline-secondary d-inline-flex align-items-center justify-content-center" +
         (className ? " " + className : "")
       }
       aria-label="Toggle theme"
       title="Toggle theme (D)"
     >
       <span aria-hidden="true">{isDark ? "\u2600" : "\u263D"}</span>
-      <span className="d-none d-sm-inline">{isDark ? "Light" : "Dark"}</span>
     </button>
   )
 }
