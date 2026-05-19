@@ -314,3 +314,43 @@ thead .sticky-col-2 {
   background: var(--bs-tertiary-bg) !important;
   box-shadow: 1px 0 0 var(--bs-border-color);
 }
+
+.crewdb-sticky-1-header,
+.crewdb-sticky-1-cell,
+.crewdb-sticky-2-header,
+.crewdb-sticky-2-cell,
+.crewdb-sticky-3-header,
+.crewdb-sticky-3-cell {
+  position: sticky !important;
+}
+
+.crewdb-sticky-1-header,
+.crewdb-sticky-1-cell {
+  left: 0 !important;
+}
+
+.crewdb-sticky-2-header,
+.crewdb-sticky-2-cell {
+  left: 130px !important;
+}
+
+.crewdb-sticky-3-header,
+.crewdb-sticky-3-cell {
+  left: 350px !important;
+}
+
+.crewdb-sticky-1-cell,
+.crewdb-sticky-2-cell,
+.crewdb-sticky-3-cell {
+  z-index: 45 !important;
+  background: var(--bs-body-bg) !important;
+  box-shadow: 1px 0 0 var(--bs-border-color);
+}
+
+.crewdb-sticky-1-header,
+.crewdb-sticky-2-header,
+.crewdb-sticky-3-header {
+  z-index: 55 !important;
+  background: var(--bs-tertiary-bg) !important;
+  box-shadow: 1px 0 0 var(--bs-border-color);
+}

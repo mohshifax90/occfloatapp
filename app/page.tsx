@@ -291,6 +291,32 @@ const ACCESS_CONTROL_FLOWS = [
   "Admin > User Management > Edit",
 ]
 
+const MODULE_VIEW_FLOW: Record<ModuleKey, string> = {
+  dashboard: "Dashboard > View",
+  crewRostering: "Crew Operation > Crew Rostering > View",
+  crewLeavePlanner: "Crew Operation > Crew Leave Planner > View",
+  crewDataBase: "Crew Operation > Crew Data Base > View",
+  crewTrainingPlan: "Crew Operation > Crew Training Plan > View",
+  staff: "Staff > Create Staff > View",
+  levels: "Staff > Staff Level > View",
+  leaveAttendanceControl: "Staff > Leave Type > View",
+  publicHolidays: "Staff > Public Holidays > View",
+  leaves: "Staff > Staff Leave > View",
+  attendance: "Staff > Attendance > View",
+  evaluation: "Staff > Evaluation > View",
+  roster: "Roster > Roster > View",
+  rosterApprovals: "Roster > Roster Approvals > View",
+  shift: "Roster > Shift Setup > View",
+  levelShiftPriority: "Roster > Level Shift Priority > View",
+  rosterPriorityType: "Roster > Roster Priority Type > View",
+  opsControl: "Daily Ops > Ops Control > View",
+  aircraftReport: "Daily Ops > Aircraft Report > View",
+  checklist: "Daily Ops > Daily Checklist > View",
+  briefing: "Daily Ops > Briefing > View",
+  roleManagement: "Admin > Role Management > View",
+  userManagement: "Admin > User Management > View",
+}
+
 const MODULES: ModuleConfig[] = [
   {
     key: "dashboard",
@@ -1376,8 +1402,19 @@ export default function Page() {
     replaceExisting: "Yes",
   })
   const [crewLeavePlannerTab, setCrewLeavePlannerTab] = useState<
-    "rotationTypes" | "attendanceCodes" | "dailyAttendance" | "generator" | "blocks" | "timeline" | "conflicts"
+    | "rotationTypes"
+    | "attendanceCodes"
+    | "dailyAttendance"
+    | "leavePatternManager"
+    | "generator"
+    | "blocks"
+    | "timeline"
+    | "conflicts"
   >("rotationTypes")
+  const [crewLeavePlannerFocusMode, setCrewLeavePlannerFocusMode] = useState(false)
+  const [leavePatternManagerSearch, setLeavePatternManagerSearch] = useState("")
+  const [leavePatternManagerCrewCode, setLeavePatternManagerCrewCode] = useState("")
+  const [leavePatternSegmentDraft, setLeavePatternSegmentDraft] = useState<Record<string, { start: string; end: string }>>({})
   const [isRotationModalOpen, setIsRotationModalOpen] = useState(false)
   const [editingRotationId, setEditingRotationId] = useState<string | null>(null)
   const [crewLeaveBlocksFilter, setCrewLeaveBlocksFilter] = useState({
@@ -1386,9 +1423,11 @@ export default function Page() {
     toDate: "",
   })
   const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState({
-    fromDate: toYmd(new Date()),
-    toDate: addDaysToYmd(toYmd(new Date()), 30),
+    fromDate: `${new Date().getFullYear()}-01-01`,
+    toDate: `${new Date().getFullYear()}-12-31`,
   })
+  const [crewLeaveTimelineCrewTypeFilter, setCrewLeaveTimelineCrewTypeFilter] = useState("Captain")
+  const [showTimelineWpLpSummary, setShowTimelineWpLpSummary] = useState(true)
   const [crewLeaveTimelineDayWidth, setCrewLeaveTimelineDayWidth] = useState(36)
   const crewLeaveTimelineScrollRef = useRef<HTMLDivElement | null>(null)
   const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
@@ -1456,6 +1495,7 @@ export default function Page() {
   const [authStaffId, setAuthStaffId] = useState<string | null>(null)
   const [loginStaffNo, setLoginStaffNo] = useState("")
   const [loginPassword, setLoginPassword] = useState("")
+  const [showLoginPassword, setShowLoginPassword] = useState(false)
   const [loginError, setLoginError] = useState("")
   const [mustChangePassword, setMustChangePassword] = useState(false)
   const [newPassword, setNewPassword] = useState("")
@@ -1626,9 +1666,22 @@ export default function Page() {
       }
       crewMap.get(crewCode)?.blocks.push(b)
     })
-    const crewRows = Array.from(crewMap.values()).sort((a, b) => a.crewCode.localeCompare(b.crewCode))
+    let crewRows = Array.from(crewMap.values()).sort((a, b) => a.crewCode.localeCompare(b.crewCode))
+    if (crewLeaveTimelineCrewTypeFilter) {
+      crewRows = crewRows.filter((row) =>
+        row.blocks.some((b) => (b.crewType || "").trim() === crewLeaveTimelineCrewTypeFilter),
+      )
+    }
     return { dates, totalDays, crewRows }
-  }, [crewGeneratedBlocks, crewLeaveTimelineFilter])
+  }, [crewGeneratedBlocks, crewLeaveTimelineFilter, crewLeaveTimelineCrewTypeFilter])
+  useEffect(() => {
+    const year = new Date().getFullYear()
+    if (crewLeavePlannerTab !== "timeline") return
+    setCrewLeaveTimelineFilter({
+      fromDate: `${year}-01-01`,
+      toDate: `${year}-12-31`,
+    })
+  }, [crewLeavePlannerTab])
   useEffect(() => {
     if (crewLeavePlannerTab !== "timeline") return
     const el = crewLeaveTimelineScrollRef.current
@@ -1698,9 +1751,16 @@ export default function Page() {
         marksByCode.set(code, (marksByCode.get(code) || 0) + days)
       })
       let deduction = 0
-      Object.entries(thresholds).forEach(([code, thresholdVal]) => {
+      const codesToEvaluate = new Set<string>([
+        ...Object.keys(thresholds || {}).map((k) => (k || "").trim().toUpperCase()).filter(Boolean),
+        ...Array.from(crewOpsCodeAllowMap.entries())
+          .filter(([, allow]) => allow)
+          .map(([code]) => (code || "").trim().toUpperCase())
+          .filter(Boolean),
+      ])
+      codesToEvaluate.forEach((code) => {
         const total = marksByCode.get(code) || 0
-        const threshold = Number(thresholdVal || "0") || 0
+        const threshold = Number((thresholds || {})[code] || "0") || 0
         const enabled =
           code === "MC"
             ? canDeduct.MC
@@ -1749,6 +1809,173 @@ export default function Page() {
       cycleCount: cycleSet.size,
     }
   }, [crewLeaveAssignmentForm.crewCode, crewGeneratedBlocks])
+  const leavePatternManagerCrewMatches = useMemo(() => {
+    const q = normalizeText(leavePatternManagerSearch)
+    if (!q) return store.crewDataBase
+    return store.crewDataBase.filter((c) => {
+      const code = normalizeText(c.crewCode || "")
+      const empNo = normalizeText(c.employeeNo || "")
+      const name = normalizeText(c.crewName || "")
+      return code.includes(q) || empNo.includes(q) || name.includes(q)
+    })
+  }, [leavePatternManagerSearch, store.crewDataBase])
+  useEffect(() => {
+    if (!leavePatternManagerCrewMatches.length) {
+      if (leavePatternManagerCrewCode) setLeavePatternManagerCrewCode("")
+      return
+    }
+    const exists = leavePatternManagerCrewMatches.some(
+      (c) => normalizeCrewCode(c.crewCode || "") === leavePatternManagerCrewCode,
+    )
+    if (exists) return
+    setLeavePatternManagerCrewCode(normalizeCrewCode(leavePatternManagerCrewMatches[0].crewCode || ""))
+  }, [leavePatternManagerCrewMatches, leavePatternManagerCrewCode])
+  const leavePatternManagerRows = useMemo(() => {
+    const selectedCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+    if (!selectedCode) return [] as Array<Record<string, string>>
+    const blockRows = computedCrewGeneratedBlocks
+      .filter((b) => normalizeCrewCode(b.crewCode || "") === selectedCode)
+      .sort((a, b) => {
+        const ca = Number(a.cycleNumber || "0") || 0
+        const cb = Number(b.cycleNumber || "0") || 0
+        if (ca !== cb) return ca - cb
+        return (a.blockType || "").localeCompare(b.blockType || "")
+      })
+    const byCycle = new Map<string, { work?: Entry; leave?: Entry; leaveActual?: string; leaveDeduction?: string }>()
+    blockRows.forEach((b) => {
+      const k = (b.cycleNumber || "").trim() || "-"
+      const slot = byCycle.get(k) || {}
+      if ((b.blockType || "").toLowerCase() === "work") slot.work = b
+      if ((b.blockType || "").toLowerCase() === "leave") {
+        slot.leave = b
+        slot.leaveActual = b.actualDays || b.plannedDays || "0"
+        slot.leaveDeduction = b.deductionDays || "0"
+      }
+      byCycle.set(k, slot)
+    })
+    return Array.from(byCycle.entries())
+      .sort((a, b) => (Number(a[0]) || 0) - (Number(b[0]) || 0))
+      .map(([cycle, v]) => ({
+        id: `rt${cycle}`,
+        cycleNumber: cycle,
+        cycleLabel: `RT${cycle}`,
+        wpStart: v.work?.startDate || "",
+        wpEnd: v.work?.endDate || "",
+        wpDays: v.work?.plannedDays || "0",
+        adjust: v.leaveDeduction || "0",
+        lpStart: v.leave?.startDate || "",
+        lpEnd: v.leave?.endDate || "",
+        lpDays: v.leave?.plannedDays || "0",
+        rem: v.leaveActual || v.leave?.plannedDays || "0",
+      }))
+  }, [computedCrewGeneratedBlocks, leavePatternManagerCrewCode])
+  const leavePatternActualSegments = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "actualleavesegment",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const leavePatternSegmentsByCycle = useMemo(() => {
+    const selectedCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+    const byCycle = new Map<string, Entry[]>()
+    leavePatternActualSegments.forEach((row) => {
+      if (normalizeCrewCode(row.crewCode || "") !== selectedCode) return
+      const cycle = (row.cycleNumber || "").trim()
+      if (!cycle) return
+      const arr = byCycle.get(cycle) || []
+      arr.push(row)
+      byCycle.set(cycle, arr)
+    })
+    byCycle.forEach((arr, cycle) => {
+      arr.sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""))
+      byCycle.set(cycle, arr)
+    })
+    return byCycle
+  }, [leavePatternActualSegments, leavePatternManagerCrewCode])
+  const crewTimelineCrewTypes = useMemo(() => {
+    const set = new Set<string>()
+    crewGeneratedBlocks.forEach((b) => {
+      const t = (b.crewType || "").trim()
+      if (t) set.add(t)
+    })
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [crewGeneratedBlocks])
+  useEffect(() => {
+    if (!crewTimelineCrewTypes.length) return
+    if (crewLeaveTimelineCrewTypeFilter && crewTimelineCrewTypes.includes(crewLeaveTimelineCrewTypeFilter)) return
+    if (crewTimelineCrewTypes.includes("Captain")) {
+      setCrewLeaveTimelineCrewTypeFilter("Captain")
+      return
+    }
+    setCrewLeaveTimelineCrewTypeFilter(crewTimelineCrewTypes[0] || "")
+  }, [crewTimelineCrewTypes, crewLeaveTimelineCrewTypeFilter])
+  const crewTypeWpLpDailySummary = useMemo(() => {
+    const fromDate = (crewLeaveTimelineFilter.fromDate || "").trim()
+    const toDate = (crewLeaveTimelineFilter.toDate || "").trim()
+    if (!fromDate || !toDate || toDate < fromDate) {
+      return [] as Array<{ date: string; crewType: string; wp: number; lp: number; total: number }>
+    }
+    const days = getDateRangeInclusive(fromDate, toDate).map((d) => toYmd(d))
+    const out: Array<{ date: string; crewType: string; wp: number; lp: number; total: number }> = []
+    days.forEach((day) => {
+      const byType = new Map<string, { wpCrew: Set<string>; lpCrew: Set<string> }>()
+      crewGeneratedBlocks.forEach((b) => {
+        const start = (b.startDate || "").trim()
+        const end = (b.endDate || "").trim()
+        if (!start || !end || day < start || day > end) return
+        const crewCode = normalizeCrewCode(b.crewCode || "")
+        if (!crewCode) return
+        const crewType = (b.crewType || "").trim() || "Unassigned"
+        if (!byType.has(crewType)) byType.set(crewType, { wpCrew: new Set<string>(), lpCrew: new Set<string>() })
+        const slot = byType.get(crewType)!
+        const blockType = (b.blockType || "").trim().toLowerCase()
+        if (blockType === "work") slot.wpCrew.add(crewCode)
+        if (blockType === "leave") slot.lpCrew.add(crewCode)
+      })
+      Array.from(byType.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .forEach(([crewType, v]) => {
+          out.push({
+            date: day,
+            crewType,
+            wp: v.wpCrew.size,
+            lp: v.lpCrew.size,
+            total: v.wpCrew.size + v.lpCrew.size,
+          })
+        })
+    })
+    return out
+  }, [crewGeneratedBlocks, crewLeaveTimelineFilter.fromDate, crewLeaveTimelineFilter.toDate])
+  const crewTypeDailySummaryMap = useMemo(() => {
+    const byType = new Map<string, Map<string, { wp: number; lp: number }>>()
+    crewTypeWpLpDailySummary.forEach((row) => {
+      if (crewLeaveTimelineCrewTypeFilter && row.crewType !== crewLeaveTimelineCrewTypeFilter) return
+      const typeMap = byType.get(row.crewType) || new Map<string, { wp: number; lp: number }>()
+      typeMap.set(row.date, { wp: row.wp, lp: row.lp })
+      byType.set(row.crewType, typeMap)
+    })
+    return Array.from(byType.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [crewTypeWpLpDailySummary, crewLeaveTimelineCrewTypeFilter])
+  const deductionByGeneratedBlockId = useMemo(() => {
+    const map = new Map<string, number>()
+    computedCrewGeneratedBlocks.forEach((b) => {
+      const id = (b.id || "").trim()
+      if (!id) return
+      const d = Number(b.deductionDays || "0") || 0
+      map.set(id, d)
+    })
+    return map
+  }, [computedCrewGeneratedBlocks])
+  const crewTimelineMonthBoundaryIndexes = useMemo(() => {
+    const set = new Set<number>()
+    for (let i = 0; i < crewLeaveTimelineView.dates.length - 1; i += 1) {
+      const cur = crewLeaveTimelineView.dates[i]?.slice(0, 7)
+      const next = crewLeaveTimelineView.dates[i + 1]?.slice(0, 7)
+      if (cur && next && cur !== next) set.add(i)
+    }
+    return set
+  }, [crewLeaveTimelineView.dates])
 
   // Conflict / overlap detection for the Crew Leave Planner.
   // Detects:
@@ -2034,8 +2261,7 @@ export default function Page() {
           }
           loaded = true
         } else if (error) {
-          disableRemoteSyncRef.current = true
-          if (mounted) setSyncStatus("local-only")
+          if (mounted) setSyncStatus("error")
         }
       }
 
@@ -2119,7 +2345,6 @@ export default function Page() {
       )
 
       if (error) {
-        disableRemoteSyncRef.current = true
         setSyncStatus("error")
         return
       }
@@ -5251,6 +5476,45 @@ export default function Page() {
     setIsFormOpen(true)
   }
 
+  const addLeavePatternActualSegment = (cycleNumber: string) => {
+    const crewCode = normalizeCrewCode(leavePatternManagerCrewCode || "")
+    if (!crewCode) {
+      window.alert("Select a crew first.")
+      return
+    }
+    const draft = leavePatternSegmentDraft[cycleNumber] || { start: "", end: "" }
+    const startDate = (draft.start || "").trim()
+    const endDate = (draft.end || "").trim()
+    if (!startDate || !endDate) {
+      window.alert("Actual Leave Start and End are required.")
+      return
+    }
+    if (endDate < startDate) {
+      window.alert("Actual Leave End must be after or equal to Start.")
+      return
+    }
+    const entry: Entry = {
+      id: `als_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      recordType: "actualLeaveSegment",
+      crewCode,
+      cycleNumber,
+      startDate,
+      endDate,
+      plannedDays: String(getDateRangeInclusive(startDate, endDate).length),
+    }
+    setStore((prev) => ({ ...prev, crewLeavePlanner: [entry, ...prev.crewLeavePlanner] }))
+    setLeavePatternSegmentDraft((prev) => ({ ...prev, [cycleNumber]: { start: "", end: "" } }))
+  }
+
+  const removeLeavePatternActualSegment = (segmentId: string) => {
+    if (!window.confirm("Delete this actual leave segment?")) return
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== segmentId),
+    }))
+  }
+
   const openInactivePopup = ({
     staffId,
     fromEdit,
@@ -6361,10 +6625,23 @@ export default function Page() {
     if (!authenticatedUserAccessFlows) return true
     return authenticatedUserAccessFlows.has(flowName)
   }
-  const canRosterView = hasAccess("Roster View")
-  const canRosterGenerate = hasAccess("Roster Generate")
-  const canRosterDownload = hasAccess("Roster Download")
-  const canRosterUpload = hasAccess("Roster Upload")
+  const hasModuleAccess = (moduleKey: ModuleKey) => {
+    const flow = MODULE_VIEW_FLOW[moduleKey]
+    if (!flow) return true
+    return hasAccess(flow)
+  }
+  const visibleNavGroups = useMemo(
+    () =>
+      NAV_GROUPS.map((g) => ({
+        ...g,
+        items: g.items.filter((it) => hasModuleAccess(it.key)),
+      })).filter((g) => g.items.length > 0),
+    [authenticatedUserAccessFlows],
+  )
+  const canRosterView = hasAccess("Roster > Roster > View")
+  const canRosterGenerate = hasAccess("Roster > Roster > Generate")
+  const canRosterDownload = hasAccess("Roster > Roster > Download")
+  const canRosterUpload = hasAccess("Roster > Roster > Upload")
   const rosterChangeCodeOptions = useMemo(() => {
     return Array.from(getAllowedRosterCodes())
       .filter((c) => c !== "-")
@@ -7088,21 +7365,43 @@ export default function Page() {
     const requested = params.get("module")
     if (!requested) return
     const valid = MODULES.some((m) => m.key === requested)
-    if (valid && requested !== activeModule) {
+    if (valid && hasModuleAccess(requested as ModuleKey) && requested !== activeModule) {
       setActiveModule(requested as ModuleKey)
     }
+    const requestedCrewTab = params.get("crewTab")
+    if (
+      requestedCrewTab &&
+      ["rotationTypes", "attendanceCodes", "dailyAttendance", "leavePatternManager", "generator", "blocks", "timeline", "conflicts"].includes(
+        requestedCrewTab,
+      )
+    ) {
+      setCrewLeavePlannerTab(requestedCrewTab as typeof crewLeavePlannerTab)
+    }
+    setCrewLeavePlannerFocusMode(params.get("crewView") === "masterOnly")
     // Run once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
+    if (hasModuleAccess(activeModule)) return
+    const firstAllowed =
+      visibleNavGroups.flatMap((g) => g.items).map((i) => i.key)[0] || "dashboard"
+    if (firstAllowed !== activeModule) setActiveModule(firstAllowed)
+  }, [activeModule, visibleNavGroups])
+
+  useEffect(() => {
     if (typeof window === "undefined") return
     const params = new URLSearchParams(window.location.search)
-    if (params.get("module") === activeModule) return
+    const sameModule = params.get("module") === activeModule
+    const currentCrewTab = params.get("crewTab") || ""
+    const nextCrewTab = activeModule === "crewLeavePlanner" ? crewLeavePlannerTab : ""
+    if (sameModule && currentCrewTab === nextCrewTab) return
     params.set("module", activeModule)
+    if (activeModule === "crewLeavePlanner") params.set("crewTab", crewLeavePlannerTab)
+    else params.delete("crewTab")
     const next = `${window.location.pathname}?${params.toString()}${window.location.hash}`
     window.history.replaceState(null, "", next)
-  }, [activeModule])
+  }, [activeModule, crewLeavePlannerTab])
 
   if (!hydrated) {
     return <main className="p-4">Loading OCCfloat...</main>
@@ -7134,15 +7433,25 @@ export default function Page() {
             </div>
             <div className="mb-3">
               <label className="form-label small fw-semibold">Password</label>
-              <input
-                type="password"
-                className="form-control"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") login()
-                }}
-              />
+              <div className="input-group">
+                <input
+                  type={showLoginPassword ? "text" : "password"}
+                  className="form-control"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") login()
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary"
+                  onClick={() => setShowLoginPassword((v) => !v)}
+                  aria-label={showLoginPassword ? "Hide password" : "Show password"}
+                >
+                  {showLoginPassword ? "Hide" : "Show"}
+                </button>
+              </div>
             </div>
             {loginError ? <div className="alert alert-danger py-2 small">{loginError}</div> : null}
             <Button className="w-100" onClick={login}>
@@ -7164,6 +7473,7 @@ export default function Page() {
   const syncInfo = syncMap[syncStatus] ?? syncMap.idle
 
   const switchModule = (key: ModuleKey) => {
+    if (!hasModuleAccess(key)) return
     setActiveModule(key)
     setStaffLookupQuery("")
     setEditingEntryId(null)
@@ -7211,7 +7521,7 @@ export default function Page() {
             >
               OC
             </button>
-            {NAV_GROUPS.map((group) => {
+            {visibleNavGroups.map((group) => {
               const GroupIcon = group.icon
               const groupActive = group.items.some((it) => it.key === activeModule)
               const isOpen = openGroupTitle === group.title
@@ -7238,7 +7548,7 @@ export default function Page() {
           {openGroupTitle ? (
             <div className="app-submenu p-3 flex-grow-1">
               {(() => {
-                const group = NAV_GROUPS.find((g) => g.title === openGroupTitle)
+                const group = visibleNavGroups.find((g) => g.title === openGroupTitle)
                 if (!group) return null
                 const GroupIcon = group.icon
                 return (
@@ -7277,6 +7587,7 @@ export default function Page() {
 
         <main
           className="flex-grow-1 d-flex flex-column min-w-0 order-1 order-lg-2"
+          style={{ overflowX: "hidden" }}
           onClick={() => setOpenGroupTitle(null)}
         >
           <header className="position-sticky top-0 bg-body border-bottom px-3 px-md-4 py-3 d-flex align-items-center justify-content-between gap-3" style={{ zIndex: 10 }}>
@@ -7312,7 +7623,7 @@ export default function Page() {
             </div>
           </header>
 
-          <div className="flex-grow-1 p-3 p-md-4">
+          <div className="flex-grow-1 p-3 p-md-4" style={{ overflowX: "hidden" }}>
             {activeConfig.key === "dashboard" ? (
             <div className="row g-3 mb-4">
               {dashboardStats.map((stat) => (
@@ -8146,14 +8457,16 @@ export default function Page() {
                   />
                 ) : activeConfig.key === "crewLeavePlanner" ? (
                   <div className="d-flex flex-column gap-3">
+                    {!crewLeavePlannerFocusMode ? (
                     <ul className="nav nav-tabs">
                       {[
                         { key: "rotationTypes", label: "Rotation Types" },
                         { key: "attendanceCodes", label: "Attendance Codes" },
                         { key: "dailyAttendance", label: "Daily Attendance Record" },
+                        { key: "leavePatternManager", label: "Leave Pattern Manager" },
                         { key: "generator", label: "Generator" },
-                        { key: "blocks", label: "Blocks (Planned vs Actual)" },
-                        { key: "timeline", label: "Daily Ops Timeline" },
+                        { key: "blocks", label: "Crew Leave Pattern" },
+                        { key: "timeline", label: "Master Roster" },
                         { key: "conflicts", label: "Conflicts" },
                       ].map((tab) => {
                         const isConflicts = tab.key === "conflicts"
@@ -8169,6 +8482,7 @@ export default function Page() {
                                     | "rotationTypes"
                                     | "attendanceCodes"
                                     | "dailyAttendance"
+                                    | "leavePatternManager"
                                     | "generator"
                                     | "blocks"
                                     | "timeline"
@@ -8190,6 +8504,7 @@ export default function Page() {
                         )
                       })}
                     </ul>
+                    ) : null}
 
                     {crewLeavePlannerTab === "rotationTypes" ? (
                       <>
@@ -8504,6 +8819,159 @@ export default function Page() {
                       </div>
                     ) : null}
 
+                    {crewLeavePlannerTab === "leavePatternManager" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold">
+                            Leave Pattern Manager
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2">
+                              <div className="col-12 col-md-5">
+                                <label className="form-label small fw-semibold">Search (Crew Code / Staff # / Name)</label>
+                                <input
+                                  className="form-control"
+                                  value={leavePatternManagerSearch}
+                                  onChange={(e) => setLeavePatternManagerSearch(e.target.value)}
+                                  placeholder="Type crew code or staff number"
+                                />
+                              </div>
+                              <div className="col-12 col-md-7">
+                                <label className="form-label small fw-semibold">Crew</label>
+                                <select
+                                  className="form-select"
+                                  value={leavePatternManagerCrewCode}
+                                  onChange={(e) => setLeavePatternManagerCrewCode(e.target.value)}
+                                >
+                                  {leavePatternManagerCrewMatches.length ? null : (
+                                    <option value="">No matching crew</option>
+                                  )}
+                                  {leavePatternManagerCrewMatches.map((c) => (
+                                    <option key={c.id} value={normalizeCrewCode(c.crewCode || "")}>
+                                      {normalizeCrewCode(c.crewCode || "")} - {c.crewName || ""} | Staff # {c.employeeNo || "-"}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="card border">
+                          <div className="card-body p-0">
+                            <div style={{ overflow: "auto" }}>
+                              <table className="table table-sm mb-0 align-middle">
+                                <thead>
+                                  <tr>
+                                    <th rowSpan={2} style={{ minWidth: 90, background: "#f8fafc" }}>Cycle</th>
+                                    <th colSpan={4} className="text-center" style={{ background: "#dbeafe", color: "#1e3a8a" }}>Work Pattern</th>
+                                    <th colSpan={4} className="text-center" style={{ background: "#dcfce7", color: "#166534" }}>Leave Pattern</th>
+                                    <th colSpan={2} className="text-center" style={{ background: "#e5e7eb", color: "#111827" }}>Actual Leave (Split)</th>
+                                  </tr>
+                                  <tr>
+                                    <th style={{ minWidth: 120 }}>Start</th>
+                                    <th style={{ minWidth: 120 }}>End</th>
+                                    <th style={{ minWidth: 100 }}>No of Days</th>
+                                    <th style={{ minWidth: 90 }}>Adjust</th>
+                                    <th style={{ minWidth: 120 }}>Start</th>
+                                    <th style={{ minWidth: 120 }}>End</th>
+                                    <th style={{ minWidth: 100 }}>No of Days</th>
+                                    <th style={{ minWidth: 90 }}>REM</th>
+                                    <th style={{ minWidth: 260 }}>Start</th>
+                                    <th style={{ minWidth: 260 }}>End</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {leavePatternManagerRows.length ? (
+                                    leavePatternManagerRows.map((r) => (
+                                      <tr key={r.id}>
+                                        <td className="fw-semibold">{r.cycleLabel.replace("RT", "Cycle ")}</td>
+                                        <td>{formatYmdToDdMmYy(r.wpStart)}</td>
+                                        <td>{formatYmdToDdMmYy(r.wpEnd)}</td>
+                                        <td>{r.wpDays}</td>
+                                        <td className={Number(r.adjust || "0") > 0 ? "text-danger fw-semibold" : ""}>{r.adjust}</td>
+                                        <td>{formatYmdToDdMmYy(r.lpStart)}</td>
+                                        <td>{formatYmdToDdMmYy(r.lpEnd)}</td>
+                                        <td>{r.lpDays}</td>
+                                        <td className="fw-semibold">{r.rem}</td>
+                                        <td>
+                                          <div className="d-flex flex-column gap-1">
+                                            {(leavePatternSegmentsByCycle.get(String(r.cycleNumber || "")) || []).map((s) => (
+                                              <div key={s.id} className="d-flex align-items-center justify-content-between border rounded px-2 py-1">
+                                                <span>{formatYmdToDdMmYy(s.startDate || "")}</span>
+                                                <button
+                                                  type="button"
+                                                  className="btn btn-sm btn-link text-danger p-0"
+                                                  onClick={() => removeLeavePatternActualSegment(s.id)}
+                                                >
+                                                  Delete
+                                                </button>
+                                              </div>
+                                            ))}
+                                            <input
+                                              type="date"
+                                              className="form-control form-control-sm"
+                                              value={leavePatternSegmentDraft[String(r.cycleNumber || "")]?.start || ""}
+                                              onChange={(e) =>
+                                                setLeavePatternSegmentDraft((prev) => ({
+                                                  ...prev,
+                                                  [String(r.cycleNumber || "")]: {
+                                                    ...(prev[String(r.cycleNumber || "")] || { start: "", end: "" }),
+                                                    start: e.target.value,
+                                                  },
+                                                }))
+                                              }
+                                            />
+                                          </div>
+                                        </td>
+                                        <td>
+                                          <div className="d-flex flex-column gap-1">
+                                            {(leavePatternSegmentsByCycle.get(String(r.cycleNumber || "")) || []).map((s) => (
+                                              <div key={`${s.id}_end`} className="border rounded px-2 py-1">
+                                                {formatYmdToDdMmYy(s.endDate || "")}
+                                              </div>
+                                            ))}
+                                            <div className="d-flex gap-1">
+                                              <input
+                                                type="date"
+                                                className="form-control form-control-sm"
+                                                value={leavePatternSegmentDraft[String(r.cycleNumber || "")]?.end || ""}
+                                                onChange={(e) =>
+                                                  setLeavePatternSegmentDraft((prev) => ({
+                                                    ...prev,
+                                                    [String(r.cycleNumber || "")]: {
+                                                      ...(prev[String(r.cycleNumber || "")] || { start: "", end: "" }),
+                                                      end: e.target.value,
+                                                    },
+                                                  }))
+                                                }
+                                              />
+                                              <button
+                                                type="button"
+                                                className="btn btn-sm btn-primary"
+                                                onClick={() => addLeavePatternActualSegment(String(r.cycleNumber || ""))}
+                                              >
+                                                Add
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    ))
+                                  ) : (
+                                    <tr>
+                                      <td colSpan={11} className="text-muted">
+                                        No generated leave pattern found for selected crew.
+                                      </td>
+                                    </tr>
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
                     {crewLeavePlannerTab === "generator" ? (
                       <div className="card border">
                         <div className="card-header bg-body-tertiary py-2 small fw-semibold">Generate Rotation</div>
@@ -8772,8 +9240,11 @@ export default function Page() {
 
                     {crewLeavePlannerTab === "blocks" ? (
                       <div className="card border">
-                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Work & Leave Blocks — Planned vs Actual</div>
+                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Crew Leave Pattern — Planned vs Actual</div>
                         <div className="card-body pb-0">
+                        <div className="alert alert-info py-2 small">
+                          This view shows only <strong>Leave Pattern</strong> blocks. Deduction and Actual days are applied here.
+                        </div>
                         <div className="row g-2">
                           <div className="col-12 col-md-4">
                             <label className="form-label small fw-semibold">Crew</label>
@@ -8817,6 +9288,7 @@ export default function Page() {
                               const crewCode = normalizeCrewCode(b.crewCode || "")
                               const startDate = (b.startDate || "").trim()
                               const endDate = (b.endDate || "").trim()
+                              if ((b.blockType || "").toLowerCase() !== "leave") return false
                               if (crewLeaveBlocksFilter.crewCode && crewCode !== crewLeaveBlocksFilter.crewCode) return false
                               if (crewLeaveBlocksFilter.fromDate && endDate < crewLeaveBlocksFilter.fromDate) return false
                               if (crewLeaveBlocksFilter.toDate && startDate > crewLeaveBlocksFilter.toDate) return false
@@ -8861,10 +9333,25 @@ export default function Page() {
 
                     {crewLeavePlannerTab === "timeline" ? (
                       <div className="card border">
-                        <div className="card-header bg-body-tertiary py-2 small fw-semibold">Daily Ops Timeline</div>
+                        <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
+                          <span>Master Roster</span>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-primary"
+                            onClick={() => {
+                              const url = new URL(window.location.href)
+                              url.searchParams.set("module", "crewLeavePlanner")
+                              url.searchParams.set("crewTab", "timeline")
+                              url.searchParams.set("crewView", "masterOnly")
+                              window.open(url.toString(), "_blank", "noopener,noreferrer")
+                            }}
+                          >
+                            Open In New Tab
+                          </button>
+                        </div>
                         <div className="card-body">
                           <div className="row g-2 mb-3">
-                            <div className="col-6 col-md-3">
+                            <div className="col-6 col-md-2">
                               <label className="form-label small fw-semibold">From Date</label>
                               <input
                                 type="date"
@@ -8875,7 +9362,7 @@ export default function Page() {
                                 }
                               />
                             </div>
-                            <div className="col-6 col-md-3">
+                            <div className="col-6 col-md-2">
                               <label className="form-label small fw-semibold">To Date</label>
                               <input
                                 type="date"
@@ -8885,6 +9372,21 @@ export default function Page() {
                                   setCrewLeaveTimelineFilter((p) => ({ ...p, toDate: e.target.value }))
                                 }
                               />
+                            </div>
+                            <div className="col-6 col-md-2">
+                              <label className="form-label small fw-semibold">Crew Type</label>
+                              <select
+                                className="form-select"
+                                value={crewLeaveTimelineCrewTypeFilter}
+                                onChange={(e) => setCrewLeaveTimelineCrewTypeFilter(e.target.value)}
+                              >
+                                <option value="">All Crew Types</option>
+                                {crewTimelineCrewTypes.map((t) => (
+                                  <option key={t} value={t}>
+                                    {t}
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                             <div className="col-12 col-md-4">
                               <label className="form-label small fw-semibold">
@@ -8900,6 +9402,15 @@ export default function Page() {
                                 onChange={(e) => setCrewLeaveTimelineDayWidth(Number(e.target.value) || 36)}
                               />
                             </div>
+                            <div className="col-12 col-md-2 d-flex align-items-end">
+                              <button
+                                type="button"
+                                className={"btn btn-sm w-100 " + (showTimelineWpLpSummary ? "btn-primary" : "btn-outline-secondary")}
+                                onClick={() => setShowTimelineWpLpSummary((v) => !v)}
+                              >
+                                WP/LP Summary {showTimelineWpLpSummary ? "On" : "Off"}
+                              </button>
+                            </div>
                           </div>
                           {!crewLeaveTimelineView.crewRows.length || !crewLeaveTimelineView.dates.length ? (
                             <div className="small text-muted">
@@ -8908,7 +9419,12 @@ export default function Page() {
                           ) : (
                             <div
                               ref={crewLeaveTimelineScrollRef}
-                              style={{ overflow: "auto", maxHeight: 560, border: "1px solid #e5e7eb", borderRadius: 8 }}
+                              style={{
+                                overflow: "auto",
+                                maxHeight: 560,
+                                border: "1px solid #e5e7eb",
+                                borderRadius: 8,
+                              }}
                             >
                               <div style={{ minWidth: 980 }}>
                                 {(() => {
@@ -8927,8 +9443,18 @@ export default function Page() {
                                   return (
                                     <>
                                       <div
-                                        className="d-flex border-bottom"
-                                        style={{ position: "sticky", top: 0, zIndex: 9, background: "var(--bs-body-bg)" }}
+                                        className="border-bottom"
+                                        style={{
+                                          display: "grid",
+                                          gridTemplateColumns: "220px auto",
+                                          width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                          minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                          position: "sticky",
+                                          top: 0,
+                                          zIndex: 30,
+                                          height: 32,
+                                          background: "var(--bs-body-bg)",
+                                        }}
                                       >
                                         <div
                                           style={{
@@ -8936,10 +9462,11 @@ export default function Page() {
                                             minWidth: 220,
                                             position: "sticky",
                                             left: 0,
-                                            zIndex: 10,
-                                            background: "var(--bs-body-bg)",
+                                            zIndex: 30,
+                                            background: "#ffffff",
                                             padding: "8px 10px",
                                             borderRight: "1px solid #e5e7eb",
+                                            boxShadow: "2px 0 0 #e5e7eb",
                                             fontWeight: 700,
                                           }}
                                         >
@@ -8952,6 +9479,7 @@ export default function Page() {
                                               style={{
                                                 width: seg.count * crewLeaveTimelineDayWidth,
                                                 minWidth: seg.count * crewLeaveTimelineDayWidth,
+                                                height: 32,
                                                 borderRight: "1px solid #e2e8f0",
                                                 display: "flex",
                                                 justifyContent: "center",
@@ -8970,8 +9498,18 @@ export default function Page() {
                                         </div>
                                       </div>
                                       <div
-                                        className="d-flex border-bottom"
-                                        style={{ position: "sticky", top: 27, zIndex: 8, background: "var(--bs-body-bg)" }}
+                                        className="border-bottom"
+                                        style={{
+                                          display: "grid",
+                                          gridTemplateColumns: "220px auto",
+                                          width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                          minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                          position: "sticky",
+                                          top: 32,
+                                          zIndex: 29,
+                                          height: 34,
+                                          background: "var(--bs-body-bg)",
+                                        }}
                                       >
                                         <div
                                           style={{
@@ -8979,10 +9517,11 @@ export default function Page() {
                                             minWidth: 220,
                                             position: "sticky",
                                             left: 0,
-                                            zIndex: 9,
-                                            background: "var(--bs-body-bg)",
+                                            zIndex: 30,
+                                            background: "#ffffff",
                                             padding: "8px 10px",
                                             borderRight: "1px solid #e5e7eb",
+                                            boxShadow: "2px 0 0 #e5e7eb",
                                             fontWeight: 700,
                                           }}
                                         >
@@ -8997,17 +9536,24 @@ export default function Page() {
                                                 style={{
                                                   width: crewLeaveTimelineDayWidth,
                                                   minWidth: crewLeaveTimelineDayWidth,
+                                                  height: 34,
                                                   fontSize: 10,
                                                   textAlign: "center",
                                                   padding: "4px 0",
-                                                  borderRight: "1px solid #eef2f7",
+                                                  borderRight: crewTimelineMonthBoundaryIndexes.has(
+                                                    crewLeaveTimelineView.dates.indexOf(date),
+                                                  )
+                                                    ? "2px solid #94a3b8"
+                                                    : "1px solid #eef2f7",
                                                   color: isToday ? "#0f172a" : "#64748b",
                                                   background: isToday ? "#fff7ed" : "transparent",
                                                   fontWeight: isToday ? 700 : 500,
                                                 }}
                                               >
                                                 <div>{date.slice(8, 10)}</div>
-                                                <div>{formatYmdToWeekdayShort(date)}</div>
+                                                {crewLeaveTimelineDayWidth > 24 ? (
+                                                  <div>{formatYmdToWeekdayShort(date)}</div>
+                                                ) : null}
                                               </div>
                                             )
                                           })}
@@ -9017,18 +9563,156 @@ export default function Page() {
                                   )
                                 })()}
 
+                                {showTimelineWpLpSummary
+                                  ? crewTypeDailySummaryMap.map(([crewType, dayMap], summaryIdx) => (
+                                  <div key={`summary-${crewType}`}>
+                                    <div
+                                      className="border-bottom"
+                                      style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "220px auto",
+                                        width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                        minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                        minHeight: 30,
+                                        background: "#f8fafc",
+                                        position: "sticky",
+                                        top: 66 + summaryIdx * 60,
+                                        zIndex: 28,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: 220,
+                                          minWidth: 220,
+                                          position: "sticky",
+                                          left: 0,
+                                          zIndex: 20,
+                                          background: "#f8fafc",
+                                          padding: "5px 10px",
+                                          borderRight: "1px solid #e5e7eb",
+                                          boxShadow: "2px 0 0 #e5e7eb",
+                                          fontWeight: 700,
+                                          fontSize: 12,
+                                        }}
+                                      >
+                                        {crewType} - WP
+                                      </div>
+                                      <div className="d-flex">
+                                        {crewLeaveTimelineView.dates.map((date) => {
+                                          const v = dayMap.get(date) || { wp: 0, lp: 0 }
+                                          const idx = crewLeaveTimelineView.dates.indexOf(date)
+                                          return (
+                                            <div
+                                              key={`${crewType}-wp-${date}`}
+                                              title={`${crewType} | ${date} | WP ${v.wp}`}
+                                              style={{
+                                                width: crewLeaveTimelineDayWidth,
+                                                minWidth: crewLeaveTimelineDayWidth,
+                                                borderRight: crewTimelineMonthBoundaryIndexes.has(idx)
+                                                  ? "2px solid #94a3b8"
+                                                  : "1px solid #eef2f7",
+                                                fontSize: crewLeaveTimelineDayWidth > 24 ? 10 : 9,
+                                                textAlign: "center",
+                                                lineHeight: 1.2,
+                                                paddingTop: 5,
+                                                color: "#1e3a8a",
+                                                fontWeight: 700,
+                                              }}
+                                            >
+                                              {v.wp}
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                    <div
+                                      className="border-bottom"
+                                      style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "220px auto",
+                                        width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                        minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                        minHeight: 30,
+                                        background: "#f0fdf4",
+                                        position: "sticky",
+                                        top: 96 + summaryIdx * 60,
+                                        zIndex: 28,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: 220,
+                                          minWidth: 220,
+                                          position: "sticky",
+                                          left: 0,
+                                          zIndex: 20,
+                                          background: "#f0fdf4",
+                                          padding: "5px 10px",
+                                          borderRight: "1px solid #e5e7eb",
+                                          boxShadow: "2px 0 0 #e5e7eb",
+                                          fontWeight: 700,
+                                          fontSize: 12,
+                                        }}
+                                      >
+                                        {crewType} - LP
+                                      </div>
+                                      <div className="d-flex">
+                                        {crewLeaveTimelineView.dates.map((date) => {
+                                          const v = dayMap.get(date) || { wp: 0, lp: 0 }
+                                          const lpOverLimit = v.lp >= 5
+                                          const idx = crewLeaveTimelineView.dates.indexOf(date)
+                                          return (
+                                            <div
+                                              key={`${crewType}-lp-${date}`}
+                                              title={`${crewType} | ${date} | LP ${v.lp}`}
+                                              style={{
+                                                width: crewLeaveTimelineDayWidth,
+                                                minWidth: crewLeaveTimelineDayWidth,
+                                                borderRight: crewTimelineMonthBoundaryIndexes.has(idx)
+                                                  ? "2px solid #94a3b8"
+                                                  : "1px solid #eef2f7",
+                                                fontSize: crewLeaveTimelineDayWidth > 24 ? 10 : 9,
+                                                textAlign: "center",
+                                                lineHeight: 1.2,
+                                                paddingTop: 5,
+                                                color: lpOverLimit ? "#ffffff" : "#166534",
+                                                background: lpOverLimit ? "#dc2626" : "transparent",
+                                                fontWeight: 700,
+                                              }}
+                                            >
+                                              {v.lp}
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))
+                                  : null}
+
                                 {crewLeaveTimelineView.crewRows.map((row) => (
-                                  <div key={row.crewCode} className="d-flex border-bottom" style={{ minHeight: 44 }}>
+                                  <div
+                                    key={row.crewCode}
+                                    className="border-bottom"
+                                    style={{
+                                      display: "grid",
+                                      gridTemplateColumns: "220px auto",
+                                      width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                      minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
+                                      minHeight: 44,
+                                    }}
+                                  >
                                     <div
                                       style={{
                                         width: 220,
                                         minWidth: 220,
                                         position: "sticky",
                                         left: 0,
-                                        zIndex: 7,
-                                        background: "var(--bs-body-bg)",
+                                        zIndex: 20,
+                                        background: "#ffffff",
                                         padding: "8px 10px",
                                         borderRight: "1px solid #e5e7eb",
+                                        boxShadow: "2px 0 0 #e5e7eb",
                                         fontWeight: 600,
                                         fontSize: 13,
                                       }}
@@ -9041,12 +9725,27 @@ export default function Page() {
                                         position: "relative",
                                         width: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
                                         minWidth: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
-                                        backgroundImage:
-                                          `repeating-linear-gradient(to right, transparent, transparent ${
-                                            crewLeaveTimelineDayWidth - 1
-                                          }px, #f1f5f9 ${crewLeaveTimelineDayWidth - 1}px, #f1f5f9 ${crewLeaveTimelineDayWidth}px)`,
+                                        backgroundImage: "linear-gradient(to right, #f1f5f9 1px, transparent 1px)",
+                                        backgroundSize: `${crewLeaveTimelineDayWidth}px 100%`,
+                                        backgroundRepeat: "repeat",
                                       }}
                                     >
+                                      {Array.from(crewTimelineMonthBoundaryIndexes).map((idx) => (
+                                        <div
+                                          key={`month-boundary-${row.crewCode}-${idx}`}
+                                          style={{
+                                            position: "absolute",
+                                            left: (idx + 1) * crewLeaveTimelineDayWidth - 1,
+                                            top: 0,
+                                            bottom: 0,
+                                            width: 2,
+                                            background: "#94a3b8",
+                                            opacity: 0.7,
+                                            pointerEvents: "none",
+                                            zIndex: 2,
+                                          }}
+                                        />
+                                      ))}
                                       {(() => {
                                         const today = toYmd(new Date())
                                         const viewStart = (crewLeaveTimelineFilter.fromDate || "").trim()
@@ -9067,8 +9766,10 @@ export default function Page() {
                                               left: todayOffset * crewLeaveTimelineDayWidth,
                                               top: 0,
                                               bottom: 0,
-                                              width: 2,
-                                              background: "#ef4444",
+                                              width: crewLeaveTimelineDayWidth,
+                                              background: "rgba(239, 68, 68, 0.22)",
+                                              borderLeft: "2px solid #dc2626",
+                                              borderRight: "2px solid #dc2626",
                                               zIndex: 6,
                                               pointerEvents: "none",
                                             }}
@@ -9085,6 +9786,19 @@ export default function Page() {
                                         const leftDays = overlapDaysInclusive(viewStart, addDaysToYmd(overlapStart, -1), viewStart, viewEnd)
                                         const spanDays = overlapDaysInclusive(overlapStart, overlapEnd, viewStart, viewEnd)
                                         const isLeave = (block.blockType || "").toLowerCase() === "leave"
+                                        const deductionDays = isLeave
+                                          ? deductionByGeneratedBlockId.get((block.id || "").trim()) || 0
+                                          : 0
+                                        const rotationKey = (block.policyName || "").trim().toUpperCase() || "DEFAULT"
+                                        const palette = [
+                                          { workBg: "#dbeafe", workBorder: "#60a5fa", workText: "#1e3a8a", leaveBg: "#dcfce7", leaveBorder: "#4ade80", leaveText: "#166534" },
+                                          { workBg: "#fef3c7", workBorder: "#f59e0b", workText: "#92400e", leaveBg: "#ffedd5", leaveBorder: "#fb923c", leaveText: "#9a3412" },
+                                          { workBg: "#e0e7ff", workBorder: "#818cf8", workText: "#3730a3", leaveBg: "#f3e8ff", leaveBorder: "#c084fc", leaveText: "#6b21a8" },
+                                          { workBg: "#ccfbf1", workBorder: "#14b8a6", workText: "#115e59", leaveBg: "#ecfccb", leaveBorder: "#84cc16", leaveText: "#3f6212" },
+                                          { workBg: "#fee2e2", workBorder: "#f87171", workText: "#991b1b", leaveBg: "#ffe4e6", leaveBorder: "#fb7185", leaveText: "#9f1239" },
+                                        ]
+                                        const seed = rotationKey.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+                                        const tone = palette[seed % palette.length]
                                         if (spanDays <= 0) return null
                                         return (
                                           <div
@@ -9096,10 +9810,10 @@ export default function Page() {
                                               top: 8,
                                               height: 26,
                                               width: Math.max(spanDays * crewLeaveTimelineDayWidth - 2, 10),
-                                              borderRadius: 6,
-                                              background: isLeave ? "#dcfce7" : "#dbeafe",
-                                              border: `1px solid ${isLeave ? "#86efac" : "#93c5fd"}`,
-                                              color: isLeave ? "#166534" : "#1e3a8a",
+                                              borderRadius: 0,
+                                              background: isLeave ? "#111827" : tone.workBg,
+                                              border: `1px solid ${isLeave ? "#0b1220" : tone.workBorder}`,
+                                              color: isLeave ? "#ffffff" : tone.workText,
                                               fontSize: 11,
                                               fontWeight: 700,
                                               padding: "4px 6px",
@@ -9108,7 +9822,26 @@ export default function Page() {
                                               textOverflow: "ellipsis",
                                             }}
                                           >
-                                            {(block.blockType || "").toUpperCase()} {start} → {end}
+                                            {(block.blockType || "").toUpperCase()} {start} → {end} ({spanDays}d)
+                                            {isLeave && deductionDays > 0 ? (
+                                              <span
+                                                style={{
+                                                  position: "absolute",
+                                                  right: 2,
+                                                  top: 2,
+                                                  background: "#dc2626",
+                                                  color: "#ffffff",
+                                                  fontWeight: 800,
+                                                  fontSize: 10,
+                                                  lineHeight: 1,
+                                                  padding: "2px 4px",
+                                                  borderRadius: 2,
+                                                  border: "1px solid #7f1d1d",
+                                                }}
+                                              >
+                                                D-{deductionDays}
+                                              </span>
+                                            ) : null}
                                           </div>
                                         )
                                       })}
