@@ -6621,7 +6621,13 @@ export default function Page() {
     if (!roleRow) return new Set<string>()
     return new Set(splitMultiValue(roleRow.controlFlows || ""))
   }, [authenticatedUser, store.userManagement, store.roleManagement])
+  const isAdminUser = useMemo(() => {
+    const role = normalizeText(authenticatedUser?.roleName || "")
+    const userType = normalizeText(authenticatedUser?.userType || "")
+    return role.includes("admin") || userType.includes("admin")
+  }, [authenticatedUser])
   const hasAccess = (flowName: string) => {
+    if (isAdminUser) return true
     if (!authenticatedUserAccessFlows) return true
     return authenticatedUserAccessFlows.has(flowName)
   }
