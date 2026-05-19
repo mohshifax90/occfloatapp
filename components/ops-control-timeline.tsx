@@ -614,6 +614,8 @@ export default function OpsControlTimeline(props: {
   // computes new bar-left from the cursor without it leaping under the
   // pointer.
   const dragOffsetXRef = useRef(0)
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null)
+  const lastCenteredKeyRef = useRef<string>("")
 
   // Live "now" indicator — refresh every 30s while the view is mounted.
   const [nowMin, setNowMin] = useState<number>(() => {
@@ -935,6 +937,8 @@ export default function OpsControlTimeline(props: {
   //   • arr  — only STA-to-MLE events
   //   • both — union of both
   const [breakMode, setBreakMode] = useState<"dep" | "arr" | "both">("dep")
+  const [breakWindowEnabled, setBreakWindowEnabled] = useState(false)
+  const [conflictWindowEnabled, setConflictWindowEnabled] = useState(false)
 
   // Horizontal pixel density. Aircraft are rows; time flows left → right.
   const PIXELS_PER_HOUR = useMemo(() => {
@@ -952,6 +956,33 @@ export default function OpsControlTimeline(props: {
         return 140
     }
   }, [tickIntervalMin])
+
+  const routeConflictBands = useMemo(() => {
+    const out: Array<{ startMin: number; endMin: number; label: string }> = []
+    brief.routeConflicts.forEach((c) => {
+      const aDep = parseTimeToMin(c.a.depTime)
+      const aArr = parseTimeToMin(c.a.arrTime)
+      const bDep = parseTimeToMin(c.b.depTime)
+      const bArr = parseTimeToMin(c.b.arrTime)
+      const mins = [aDep, aArr, bDep, bArr].filter((v): v is number => v != null)
+      if (!mins.length) return
+      const start = Math.max(Math.min(...mins) - 15, 0)
+      const end = Math.min(Math.max(...mins) + 15, 24 * 60)
+      out.push({ startMin: start, endMin: end, label: c.destination || "Conflict" })
+    })
+    out.sort((x, y) => x.startMin - y.startMin)
+    const merged: Array<{ startMin: number; endMin: number; labels: Set<string> }> = []
+    out.forEach((b) => {
+      const last = merged[merged.length - 1]
+      if (!last || b.startMin > last.endMin) {
+        merged.push({ startMin: b.startMin, endMin: b.endMin, labels: new Set([b.label]) })
+      } else {
+        last.endMin = Math.max(last.endMin, b.endMin)
+        last.labels.add(b.label)
+      }
+    })
+    return merged.map((m) => ({ startMin: m.startMin, endMin: m.endMin, label: Array.from(m.labels).join(", ") }))
+  }, [brief.routeConflicts])
 
   // Auto-fit time range to data, snapped to the chosen interval boundaries.
   const range = useMemo(() => {
@@ -1001,6 +1032,33 @@ export default function OpsControlTimeline(props: {
     if (nowMin < range.startMin || nowMin > range.endMin) return null
     return ((nowMin - range.startMin) / 60) * PIXELS_PER_HOUR
   }, [nowMin, range, PIXELS_PER_HOUR])
+
+  const AIRCRAFT_COL_W = 130
+
+  useEffect(() => {
+    const scroller = timelineScrollRef.current
+    if (!scroller) return
+    if (nowX == null) return
+    if (flights.length === 0) return
+
+    const centerKey = `${scheduleDate}|${tickIntervalMin}|${range.startMin}|${range.endMin}|${flights.length}`
+    if (lastCenteredKeyRef.current === centerKey) return
+
+    const timelineViewportW = Math.max(0, scroller.clientWidth - AIRCRAFT_COL_W)
+    const rawTarget = AIRCRAFT_COL_W + nowX - timelineViewportW / 2
+    const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+    const targetLeft = Math.max(0, Math.min(rawTarget, maxLeft))
+    scroller.scrollLeft = targetLeft
+    lastCenteredKeyRef.current = centerKey
+  }, [
+    AIRCRAFT_COL_W,
+    flights.length,
+    nowX,
+    range.endMin,
+    range.startMin,
+    scheduleDate,
+    tickIntervalMin,
+  ])
 
   // Color a flight bar by tail # so the same aircraft stays one color. Palette
   // is wide enough that even large fleets get distinct tints before recycling.
@@ -1328,14 +1386,50 @@ export default function OpsControlTimeline(props: {
               </div>
 
               <div className="row g-3">
-                {/* Service window by month */}
+                {/* Break Window */}
                 <div className="col-md-6">
                   <div className="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
                     <div className="fw-semibold small d-flex align-items-center gap-2">
                       <Coffee size={14} color="#92400e" />
-                      Service window by month
+                      Break Window
                     </div>
                     <div className="d-flex align-items-center gap-2">
+                      <div className="btn-group btn-group-sm" role="group" aria-label="Conflict window toggle">
+                        <button
+                          type="button"
+                          className={`btn ${conflictWindowEnabled ? "btn-danger" : "btn-outline-secondary"}`}
+                          onClick={() => setConflictWindowEnabled(true)}
+                          title="Show conflict bands on Daily Ops Timeline"
+                        >
+                          Conflict On
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn ${!conflictWindowEnabled ? "btn-secondary" : "btn-outline-secondary"}`}
+                          onClick={() => setConflictWindowEnabled(false)}
+                          title="Hide conflict bands from Daily Ops Timeline"
+                        >
+                          Conflict Off
+                        </button>
+                      </div>
+                      <div className="btn-group btn-group-sm" role="group" aria-label="Break window toggle">
+                        <button
+                          type="button"
+                          className={`btn ${breakWindowEnabled ? "btn-success" : "btn-outline-secondary"}`}
+                          onClick={() => setBreakWindowEnabled(true)}
+                          title="Show break window on Daily Ops Timeline"
+                        >
+                          On
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn ${!breakWindowEnabled ? "btn-secondary" : "btn-outline-secondary"}`}
+                          onClick={() => setBreakWindowEnabled(false)}
+                          title="Hide break window from Daily Ops Timeline"
+                        >
+                          Off
+                        </button>
+                      </div>
                       <div
                         className="btn-group btn-group-sm"
                         role="group"
@@ -1650,6 +1744,7 @@ export default function OpsControlTimeline(props: {
             </div>
           ) : (
             <div
+              ref={timelineScrollRef}
               style={{
                 border: "1px solid var(--bs-border-color, #e2e8f0)",
                 borderRadius: 8,
@@ -1659,7 +1754,6 @@ export default function OpsControlTimeline(props: {
               }}
             >
               {(() => {
-                const AIRCRAFT_COL_W = 130
                 const HEADER_H = 40
                 const ROW_H = 60
                 const totalGridW = AIRCRAFT_COL_W + trackWidth
@@ -2099,7 +2193,7 @@ export default function OpsControlTimeline(props: {
                         spanning all aircraft rows behind the flight bars.
                         Reflects whichever mode the brief toggle is set to:
                         Dep / Arr / Both. */}
-                    {brief.breaksByMode[breakMode].map((b, i) => {
+                    {breakWindowEnabled ? brief.breaksByMode[breakMode].map((b, i) => {
                       if (b.endMin <= range.startMin || b.startMin >= range.endMin) {
                         return null
                       }
@@ -2168,7 +2262,40 @@ export default function OpsControlTimeline(props: {
                           </div>
                         </div>
                       )
-                    })}
+                    }) : null}
+
+                    {/* Route conflict bands (red) */}
+                    {conflictWindowEnabled
+                      ? routeConflictBands.map((b, i) => {
+                          if (b.endMin <= range.startMin || b.startMin >= range.endMin) return null
+                          const clipStart = Math.max(b.startMin, range.startMin)
+                          const clipEnd = Math.min(b.endMin, range.endMin)
+                          const xLeft = ((clipStart - range.startMin) / 60) * PIXELS_PER_HOUR
+                          const xRight = ((clipEnd - range.startMin) / 60) * PIXELS_PER_HOUR
+                          const w = xRight - xLeft
+                          if (w <= 0) return null
+                          const fmtMin = (m: number) => `${pad2(Math.floor(m / 60) % 24)}:${pad2(m % 60)}`
+                          return (
+                            <div
+                              key={`conf-band-${i}`}
+                              style={{
+                                position: "absolute",
+                                left: AIRCRAFT_COL_W + xLeft,
+                                top: HEADER_H,
+                                width: w,
+                                bottom: 0,
+                                background:
+                                  "repeating-linear-gradient(135deg, rgba(220,38,38,0.22) 0 8px, rgba(220,38,38,0.1) 8px 16px)",
+                                borderLeft: "1px solid #dc2626",
+                                borderRight: "1px solid #dc2626",
+                                zIndex: 2,
+                                pointerEvents: "none",
+                              }}
+                              title={`Conflict ${fmtMin(b.startMin)} → ${fmtMin(b.endMin)} | ${b.label}`}
+                            />
+                          )
+                        })
+                      : null}
 
                     {/* Live "now" indicator — vertical red line spanning all rows */}
                     {nowX != null ? (
