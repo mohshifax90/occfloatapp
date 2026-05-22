@@ -2755,7 +2755,7 @@ export default function Page() {
         }
       }
 
-      if (supabase && !disableRemoteSyncRef.current && !loaded) {
+      if (supabase && !disableRemoteSyncRef.current) {
         const { data, error } = await supabase
           .from(SUPABASE_STORE_TABLE)
           .select("payload")
