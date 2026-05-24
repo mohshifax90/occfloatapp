@@ -28,6 +28,7 @@ import {
 export type FlightEntry = {
   id: string
   createdAt: string
+  recordType?: string
   scheduleDate: string
   aircraft: string
   flightNo: string
@@ -39,7 +40,26 @@ export type FlightEntry = {
   sic: string
   ca: string
   pax: string
+  emb?: string
+  demb?: string
+  crewBriefing?: string
+  dispatchNote?: string
   remarks: string
+  releaseVersion?: string
+  releaseBy?: string
+  releaseTime?: string
+  uploadFileName?: string
+  isInitialSchedule?: string
+  previousVersionId?: string
+  snapshotJson?: string
+  changeType?: string
+  changeField?: string
+  changeBefore?: string
+  changeAfter?: string
+  changeFlightKey?: string
+  mxType?: string
+  reason?: string
+  defaultDurationMin?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +68,7 @@ export type FlightEntry = {
 // first time the user uploads a file. The script attaches `XLSX` to window.
 // ---------------------------------------------------------------------------
 const SHEETJS_CDN = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+const OPS_CONTROL_DATE_KEY = "occfloat.opsControl.scheduleDate"
 
 type SheetJSWindow = Window & {
   XLSX?: {
@@ -77,6 +98,12 @@ type SheetJSWindow = Window & {
     }
   }
 }
+
+const DEFAULT_MX_REASONS = [
+  { reason: "AOG Check", defaultDurationMin: 120 },
+  { reason: "Transit Check", defaultDurationMin: 60 },
+  { reason: "Technical Delay", defaultDurationMin: 180 },
+]
 
 let sheetJsPromise: Promise<void> | null = null
 function loadSheetJs(): Promise<void> {
@@ -219,14 +246,49 @@ function isSimilarFlightNo(a: string, b: string): boolean {
   const na = normalizeFlightNo(a)
   const nb = normalizeFlightNo(b)
   if (!na || !nb) return false
-  if (na === nb) return true
-  return na.includes(nb) || nb.includes(na)
+  return na === nb
 }
 
 function isMleLeg(f: FlightEntry): boolean {
   const o = (f.origin || "").trim().toUpperCase()
   const d = (f.destination || "").trim().toUpperCase()
   return o === "MLE" || d === "MLE"
+}
+
+function flightKeyForDiff(f: Pick<FlightEntry, "aircraft" | "flightNo" | "origin" | "destination">): string {
+  return [
+    (f.aircraft || "").trim().toUpperCase(),
+    normalizeFlightNo(f.flightNo || ""),
+    (f.origin || "").trim().toUpperCase(),
+    (f.destination || "").trim().toUpperCase(),
+  ].join("|")
+}
+
+function flightSegmentKeyForDiff(f: Pick<FlightEntry, "flightNo" | "origin" | "destination">): string {
+  return [
+    normalizeFlightNo(f.flightNo || ""),
+    (f.origin || "").trim().toUpperCase(),
+    (f.destination || "").trim().toUpperCase(),
+  ].join("|")
+}
+
+function isInitialVersionFlag(version: { isInitialSchedule?: string; releaseVersion?: string }): boolean {
+  const explicit = (version.isInitialSchedule || "").trim().toLowerCase()
+  if (explicit === "yes") return true
+  const rv = (version.releaseVersion || "").trim().toLowerCase()
+  return rv === "initial" || rv.startsWith("initial ")
+}
+
+const RELEASE_VERSION_ORDER = ["Initial", "REV1", "REV2", "REV3", "Final"] as const
+
+function normalizeReleaseVersionLabel(value: string): string {
+  const raw = (value || "").trim().toUpperCase().replace(/\s+/g, "")
+  if (!raw) return ""
+  if (raw === "INITIAL") return "Initial"
+  if (raw === "FINAL") return "Final"
+  const rev = raw.match(/^REV(\d+)$/)
+  if (!rev) return value.trim()
+  return `REV${Number(rev[1])}`
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +422,8 @@ function parseAaoc(rows: unknown[][]): {
       sic,
       ca,
       pax,
+      emb: embVal,
+      demb: dembVal,
       remarks,
     })
   }
@@ -471,6 +535,8 @@ function parseLegacySchedule(rows: unknown[][]): {
           sic: "",
           ca: "",
           pax: dep.e || arr.d || "",
+          emb: dep.e || "",
+          demb: arr.d || "",
           remarks: dep.remarks || arr.remarks || "",
         })
       }
@@ -487,6 +553,8 @@ function parseLegacySchedule(rows: unknown[][]): {
           sic: "",
           ca: "",
           pax: trailing.e || trailing.d || "",
+          emb: trailing.e || "",
+          demb: trailing.d || "",
           remarks: trailing.remarks,
         })
       }
@@ -503,6 +571,8 @@ function parseLegacySchedule(rows: unknown[][]): {
         sic: "",
         ca: "",
         pax: only.e || only.d || "",
+        emb: only.e || "",
+        demb: only.d || "",
         remarks: only.remarks,
       })
     }
@@ -598,8 +668,57 @@ async function parseExcelFile(file: File): Promise<{
 export default function OpsControlTimeline(props: {
   flights: FlightEntry[]
   setFlights: (next: FlightEntry[]) => void
+  view?: "full" | "mxTypeManager"
 }) {
-  const { flights: allFlights, setFlights } = props
+  const { flights: allFlights, setFlights, view = "full" } = props
+  const flightRows = useMemo(
+    () =>
+      allFlights.filter((f) => {
+        const rt = (f.recordType || "").trim().toLowerCase()
+        return (
+          rt !== "scheduleversion" &&
+          rt !== "schedulechange" &&
+          rt !== "mx" &&
+          rt !== "mxreason"
+        )
+      }),
+    [allFlights],
+  )
+  const versionRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "scheduleversion")
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")),
+    [allFlights],
+  )
+  const scheduleChangeRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "schedulechange")
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")),
+    [allFlights],
+  )
+  const mxReasonRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "mxreason")
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")),
+    [allFlights],
+  )
+  const mxTypeRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "mxtype")
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")),
+    [allFlights],
+  )
+  const mxConfigRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "mxconfig")
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")),
+    [allFlights],
+  )
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -614,16 +733,41 @@ export default function OpsControlTimeline(props: {
     isInitial: boolean
   } | null>(null)
   const [isImportModalOpen, setIsImportModalOpen] = useState(false)
+  const [isMxModalOpen, setIsMxModalOpen] = useState(false)
+  const [editingMxId, setEditingMxId] = useState<string | null>(null)
+  const [showScheduleVersions, setShowScheduleVersions] = useState(false)
+  const [showUploadedTable, setShowUploadedTable] = useState(false)
+  const [showComparisonLog, setShowComparisonLog] = useState(false)
   const [scheduleDate, setScheduleDate] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      const saved = window.localStorage.getItem(OPS_CONTROL_DATE_KEY)
+      if (saved) return saved
+    }
     const d = new Date()
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
   })
   // Scope Ops timeline computations to the selected day only.
   // This prevents heavy multi-day datasets from freezing the screen.
   const flights = useMemo(
-    () => allFlights.filter((f) => (f.scheduleDate || "").trim() === scheduleDate),
+    () => flightRows.filter((f) => (f.scheduleDate || "").trim() === scheduleDate),
+    [flightRows, scheduleDate],
+  )
+  const mxRows = useMemo(
+    () =>
+      allFlights
+        .filter((f) => (f.recordType || "").trim().toLowerCase() === "mx")
+        .filter((f) => (f.scheduleDate || "").trim() === scheduleDate)
+        .sort((a, b) => (a.depTime || "").localeCompare(b.depTime || "")),
     [allFlights, scheduleDate],
   )
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(OPS_CONTROL_DATE_KEY, scheduleDate)
+    } catch {
+      // non-blocking
+    }
+  }, [scheduleDate])
 
   // Tick interval slider — discrete steps in minutes. Default 15.
   const INTERVAL_OPTIONS = [5, 10, 15, 30, 60]
@@ -638,7 +782,61 @@ export default function OpsControlTimeline(props: {
     const d = new Date()
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
   })
-  const [isInitialSchedule, setIsInitialSchedule] = useState(false)
+  const [mxForm, setMxForm] = useState({
+    aircraft: "",
+    mxType: "Line",
+    mxSchedule: "Schedule",
+    reason: "",
+    defaultDurationMin: "120",
+    startTime: "00:00",
+    endTime: "02:00",
+  })
+  const [mxTypeForm, setMxTypeForm] = useState({ name: "" })
+  const [editingMxTypeId, setEditingMxTypeId] = useState<string | null>(null)
+  const [mxReasonForm, setMxReasonForm] = useState({ reason: "", defaultDurationMin: "120" })
+  const [editingMxReasonId, setEditingMxReasonId] = useState<string | null>(null)
+  const [mxSetupModal, setMxSetupModal] = useState(false)
+  const [editingMxConfigId, setEditingMxConfigId] = useState<string | null>(null)
+  const [mxConfigForm, setMxConfigForm] = useState({
+    mxType: "Line",
+    mxSchedule: "Schedule",
+    reason: "",
+    defaultDurationMin: "120",
+  })
+  const openReuploadForVersion = (v: FlightEntry) => {
+    setScheduleDate((v.scheduleDate || "").trim() || scheduleDate)
+    setReleaseVersion((v.releaseVersion || "").trim() || "Initial")
+    setReleaseBy((v.releaseBy || "").trim())
+    setReleaseTime((v.releaseTime || "").trim() || releaseTime)
+    setIsImportModalOpen(true)
+  }
+  const versionsForSelectedDate = useMemo(
+    () => versionRows.filter((v) => (v.scheduleDate || "").trim() === scheduleDate),
+    [versionRows, scheduleDate],
+  )
+  const nextReleaseVersion = useMemo(() => {
+    if (!versionsForSelectedDate.length) return "Initial"
+    let maxIdx = 0
+    versionsForSelectedDate.forEach((v) => {
+      const n = normalizeReleaseVersionLabel(v.releaseVersion || "")
+      const idx = RELEASE_VERSION_ORDER.findIndex((x) => x.toUpperCase() === n.toUpperCase())
+      if (idx > maxIdx) maxIdx = idx
+    })
+    return RELEASE_VERSION_ORDER[Math.min(maxIdx + 1, RELEASE_VERSION_ORDER.length - 1)]
+  }, [versionsForSelectedDate])
+  const releaseVersionOptions = useMemo(() => {
+    if (!versionsForSelectedDate.length) return ["Initial"]
+    const used = new Set(
+      versionsForSelectedDate.map((v) => normalizeReleaseVersionLabel(v.releaseVersion || "")),
+    )
+    const idx = RELEASE_VERSION_ORDER.findIndex((x) => x === nextReleaseVersion)
+    const out = RELEASE_VERSION_ORDER.slice(idx)
+    return out.length ? out.filter((x) => !used.has(x) || x === nextReleaseVersion) : ["Final"]
+  }, [nextReleaseVersion, versionsForSelectedDate])
+
+  useEffect(() => {
+    setReleaseVersion(nextReleaseVersion)
+  }, [nextReleaseVersion])
 
   // Drag-and-drop: when a bar is dropped we open a confirmation dialog
   // showing the target's existing schedule, the new STD/STA after the
@@ -658,6 +856,23 @@ export default function OpsControlTimeline(props: {
     groupFlightIds: string[]
   } | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [segmentNoteModal, setSegmentNoteModal] = useState<{
+    open: boolean
+    flightId: string
+    tab: "briefing" | "dispatch"
+    crewBriefing: string
+    dispatchNote: string
+  }>({
+    open: false,
+    flightId: "",
+    tab: "briefing",
+    crewBriefing: "",
+    dispatchNote: "",
+  })
+  const [mxDetailModal, setMxDetailModal] = useState<{ open: boolean; mxId: string }>({
+    open: false,
+    mxId: "",
+  })
   // X-offset of the cursor inside the bar at drag start, so dropping
   // computes new bar-left from the cursor without it leaping under the
   // pointer.
@@ -679,6 +894,329 @@ export default function OpsControlTimeline(props: {
     const id = window.setInterval(tick, 30_000)
     return () => window.clearInterval(id)
   }, [])
+
+  const openSegmentNoteModal = (f: FlightEntry) => {
+    setSegmentNoteModal({
+      open: true,
+      flightId: f.id,
+      tab: "briefing",
+      crewBriefing: (f.crewBriefing || "").trim(),
+      dispatchNote: (f.dispatchNote || "").trim(),
+    })
+  }
+  const closeSegmentNoteModal = () =>
+    setSegmentNoteModal((prev) => ({ ...prev, open: false }))
+  const saveSegmentNotes = () => {
+    if (!segmentNoteModal.flightId) return
+    setFlights(
+      allFlights.map((row) =>
+        row.id !== segmentNoteModal.flightId
+          ? row
+          : {
+              ...row,
+              crewBriefing: segmentNoteModal.crewBriefing.trim(),
+              dispatchNote: segmentNoteModal.dispatchNote.trim(),
+            },
+      ),
+    )
+    closeSegmentNoteModal()
+  }
+
+  const mxReasons = useMemo(() => {
+    const map = new Map<string, number>()
+    DEFAULT_MX_REASONS.forEach((r) => map.set(r.reason, r.defaultDurationMin))
+    mxConfigRows.forEach((row) => {
+      const reason = (row.reason || "").trim()
+      const n = Number((row.defaultDurationMin || "").trim())
+      if (reason && Number.isFinite(n) && n > 0) map.set(reason, n)
+    })
+    mxReasonRows.forEach((row) => {
+      const reason = (row.reason || row.remarks || "").trim()
+      if (!reason) return
+      const n = Number((row.defaultDurationMin || row.pax || "").toString().trim())
+      if (Number.isFinite(n) && n > 0) map.set(reason, n)
+    })
+    return Array.from(map.entries()).map(([reason, duration]) => ({ reason, duration }))
+  }, [mxReasonRows, mxConfigRows])
+  const mxTypeOptions = useMemo(() => {
+    const set = new Set<string>(["Line", "Base"])
+    mxConfigRows.forEach((r) => {
+      const name = (r.mxType || "").trim()
+      if (name) set.add(name)
+    })
+    mxTypeRows.forEach((r) => {
+      const name = (r.mxType || r.remarks || "").trim()
+      if (name) set.add(name)
+    })
+    return Array.from(set)
+  }, [mxTypeRows, mxConfigRows])
+
+  const applyMxDuration = (startTime: string, durationMin: number) => {
+    const base = parseTimeToMin(startTime)
+    if (base == null) return ""
+    const end = (base + Math.max(0, durationMin)) % (24 * 60)
+    return `${pad2(Math.floor(end / 60))}:${pad2(end % 60)}`
+  }
+
+  const openMxModal = () => {
+    const firstAircraft = aircraftList[0] || ""
+    const firstReason = mxReasons[0]?.reason || ""
+    const firstDuration = mxReasons[0]?.duration ?? 120
+    setMxForm({
+      aircraft: firstAircraft,
+      mxType: "Line",
+      mxSchedule: "Schedule",
+      reason: firstReason,
+      defaultDurationMin: String(firstDuration),
+      startTime: "00:00",
+      endTime: applyMxDuration("00:00", firstDuration) || "02:00",
+    })
+    setEditingMxId(null)
+    setIsMxModalOpen(true)
+  }
+  const saveMxType = () => {
+    const name = (mxTypeForm.name || "").trim()
+    if (!name) return
+    if (editingMxTypeId) {
+      setFlights(
+        allFlights.map((row) =>
+          row.id === editingMxTypeId ? { ...row, mxType: name, remarks: name } : row,
+        ),
+      )
+    } else {
+      const now = new Date().toISOString()
+      const row: FlightEntry = {
+        id: `mxt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: now,
+        recordType: "mxType",
+        scheduleDate,
+        aircraft: "",
+        flightNo: "",
+        origin: "",
+        destination: "",
+        depTime: "",
+        arrTime: "",
+        pic: "",
+        sic: "",
+        ca: "",
+        pax: "",
+        remarks: name,
+        mxType: name,
+      } as FlightEntry
+      setFlights([row, ...allFlights])
+    }
+    setMxTypeForm({ name: "" })
+    setEditingMxTypeId(null)
+  }
+  const editMxType = (row: FlightEntry) => {
+    setEditingMxTypeId(row.id)
+    setMxTypeForm({ name: (row.mxType || row.remarks || "").trim() })
+  }
+  const deleteMxType = (id: string) => {
+    if (!window.confirm("Delete this MX Type?")) return
+    setFlights(allFlights.filter((r) => r.id !== id))
+  }
+
+  const saveMxReason = () => {
+    const reason = (mxReasonForm.reason || "").trim()
+    const mins = Number(mxReasonForm.defaultDurationMin || "0")
+    if (!reason || !Number.isFinite(mins) || mins <= 0) return
+    if (editingMxReasonId) {
+      setFlights(
+        allFlights.map((row) =>
+          row.id === editingMxReasonId
+            ? {
+                ...row,
+                reason,
+                remarks: reason,
+                defaultDurationMin: String(mins),
+                pax: String(mins),
+              }
+            : row,
+        ),
+      )
+    } else {
+      const now = new Date().toISOString()
+      const row: FlightEntry = {
+        id: `mxr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: now,
+        recordType: "mxReason",
+        scheduleDate,
+        aircraft: "",
+        flightNo: "",
+        origin: "",
+        destination: "",
+        depTime: "",
+        arrTime: "",
+        pic: "",
+        sic: "",
+        ca: "",
+        pax: String(mins),
+        remarks: reason,
+        reason,
+        defaultDurationMin: String(mins),
+      } as FlightEntry
+      setFlights([row, ...allFlights])
+    }
+    setMxReasonForm({ reason: "", defaultDurationMin: "120" })
+    setEditingMxReasonId(null)
+  }
+  const editMxReason = (row: FlightEntry) => {
+    const mins = Number(row.defaultDurationMin || row.pax || "120")
+    setEditingMxReasonId(row.id)
+    setMxReasonForm({
+      reason: (row.reason || row.remarks || "").trim(),
+      defaultDurationMin: Number.isFinite(mins) ? String(mins) : "120",
+    })
+  }
+  const deleteMxReason = (id: string) => {
+    if (!window.confirm("Delete this MX Reason?")) return
+    setFlights(allFlights.filter((r) => r.id !== id))
+  }
+  const openNewMxConfig = () => {
+    setEditingMxConfigId(null)
+    setMxConfigForm({ mxType: "Line", mxSchedule: "Schedule", reason: "", defaultDurationMin: "120" })
+    setMxSetupModal(true)
+  }
+  const openEditMxConfig = (row: FlightEntry) => {
+    setEditingMxConfigId(row.id)
+    setMxConfigForm({
+      mxType: (row.mxType || "Line").trim() || "Line",
+      mxSchedule: (row.remarks || "Schedule").trim() || "Schedule",
+      reason: (row.reason || "").trim(),
+      defaultDurationMin: (row.defaultDurationMin || "120").trim() || "120",
+    })
+    setMxSetupModal(true)
+  }
+  const saveMxConfig = () => {
+    const reason = mxConfigForm.reason.trim()
+    const mxType = mxConfigForm.mxType.trim()
+    const mxSchedule = mxConfigForm.mxSchedule.trim()
+    const mins = Number(mxConfigForm.defaultDurationMin || "0")
+    if (!mxType || !mxSchedule || !reason || !Number.isFinite(mins) || mins <= 0) return
+    if (editingMxConfigId) {
+      setFlights(
+        allFlights.map((r) =>
+          r.id === editingMxConfigId
+            ? { ...r, mxType, remarks: mxSchedule, reason, defaultDurationMin: String(mins) }
+            : r,
+        ),
+      )
+    } else {
+      const now = new Date().toISOString()
+      const row: FlightEntry = {
+        id: `mxc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        createdAt: now,
+        recordType: "mxConfig",
+        scheduleDate,
+        aircraft: "",
+        flightNo: "",
+        origin: "",
+        destination: "",
+        depTime: "",
+        arrTime: "",
+        pic: "",
+        sic: "",
+        ca: "",
+        pax: "",
+        mxType,
+        remarks: mxSchedule,
+        reason,
+        defaultDurationMin: String(mins),
+      } as FlightEntry
+      setFlights([row, ...allFlights])
+    }
+    setMxSetupModal(false)
+    setEditingMxConfigId(null)
+  }
+  const deleteMxConfig = (id: string) => {
+    if (!window.confirm("Delete this MX setup?")) return
+    setFlights(allFlights.filter((r) => r.id !== id))
+  }
+
+  const openEditMxModal = (mx: FlightEntry) => {
+    const duration = Number(mx.defaultDurationMin || mx.pax || "120")
+    setMxForm({
+      aircraft: (mx.aircraft || "").trim(),
+      mxType: (mx.mxType || "Line").trim() || "Line",
+      mxSchedule: (mx.remarks || "Schedule").trim() || "Schedule",
+      reason: (mx.reason || "").trim(),
+      defaultDurationMin: Number.isFinite(duration) ? String(duration) : "120",
+      startTime: (mx.depTime || "").trim() || "00:00",
+      endTime: (mx.arrTime || "").trim() || "02:00",
+    })
+    setEditingMxId(mx.id)
+    setIsMxModalOpen(true)
+  }
+
+  const deleteMxEntry = (mxId: string) => {
+    if (!window.confirm("Delete this MX log entry?")) return
+    setFlights(allFlights.filter((row) => row.id !== mxId))
+  }
+
+  const saveMxEntry = () => {
+    if (!mxForm.aircraft.trim() || !mxForm.reason.trim() || !mxForm.startTime || !mxForm.endTime) {
+      setErrorMsg("MX requires Aircraft, Reason, Start Time and End Time.")
+      return
+    }
+    const now = new Date().toISOString()
+    const duration = Number(mxForm.defaultDurationMin || "0")
+    const mxEntry: FlightEntry = {
+      id: editingMxId || `mx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      createdAt:
+        editingMxId
+          ? allFlights.find((x) => x.id === editingMxId)?.createdAt || now
+          : now,
+      recordType: "mx",
+      scheduleDate,
+      aircraft: mxForm.aircraft.trim(),
+      flightNo: "MX",
+      origin: "",
+      destination: "",
+      depTime: mxForm.startTime,
+      arrTime: mxForm.endTime,
+      pic: "",
+      sic: "",
+      ca: "",
+      pax: Number.isFinite(duration) ? String(duration) : "",
+      remarks: mxForm.mxSchedule,
+      mxType: mxForm.mxType,
+      reason: mxForm.reason.trim(),
+      defaultDurationMin: Number.isFinite(duration) ? String(duration) : "",
+    } as FlightEntry
+    const reasonExists = mxReasonRows.some(
+      (r) => ((r.reason || r.remarks || "").trim().toLowerCase() === mxForm.reason.trim().toLowerCase()),
+    )
+    const reasonRow: FlightEntry | null = reasonExists
+      ? null
+      : ({
+          id: `mxr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          createdAt: now,
+          recordType: "mxReason",
+          scheduleDate,
+          aircraft: "",
+          flightNo: "",
+          origin: "",
+          destination: "",
+          depTime: "",
+          arrTime: "",
+          pic: "",
+          sic: "",
+          ca: "",
+          pax: Number.isFinite(duration) ? String(duration) : "",
+          remarks: mxForm.reason.trim(),
+          reason: mxForm.reason.trim(),
+          defaultDurationMin: Number.isFinite(duration) ? String(duration) : "",
+        } as FlightEntry)
+    if (editingMxId) {
+      setFlights(allFlights.map((row) => (row.id === editingMxId ? mxEntry : row)))
+    } else {
+      setFlights(reasonRow ? [mxEntry, reasonRow, ...allFlights] : [mxEntry, ...allFlights])
+    }
+    setErrorMsg(null)
+    setEditingMxId(null)
+    setIsMxModalOpen(false)
+  }
 
   // ----- handle file -----
   const handleFile = async (file: File) => {
@@ -708,7 +1246,9 @@ export default function OpsControlTimeline(props: {
       }
       const resolvedReleaseBy = (detectedReleaseBy || releaseBy).trim()
       const resolvedReleaseTime = (detectedReleaseTime || releaseTime).trim()
-      const resolvedReleaseVersion = (detectedReleaseVersion || releaseVersion || "Initial").trim()
+      const resolvedReleaseVersion = normalizeReleaseVersionLabel(
+        (detectedReleaseVersion || releaseVersion || "Initial").trim(),
+      )
       if (!resolvedReleaseBy || !resolvedReleaseTime) {
         setErrorMsg(
           "Could not find Release By/Release Time in sheet. Please fill them in the import popup and try again.",
@@ -719,10 +1259,308 @@ export default function OpsControlTimeline(props: {
       const entries: FlightEntry[] = parsed.map((f, i) => ({
         id: `flt_${Date.now().toString(36)}_${i.toString(36)}`,
         createdAt: now,
+        recordType: "flight",
         scheduleDate,
         ...f,
       }))
-      setFlights(entries)
+      const versionsForDate = versionRows.filter((v) => (v.scheduleDate || "").trim() === scheduleDate)
+      const initialVersionForDate = versionsForDate.find(
+        (v) => (v.isInitialSchedule || "").trim().toLowerCase() === "yes",
+      )
+      const latestVersionForDate = versionsForDate[0]
+      const thisImportIsInitial = resolvedReleaseVersion === "Initial"
+      // Always compare against the Initial version for this date when available.
+      // If no Initial exists yet, fall back to the latest imported version.
+      const previousVersion = initialVersionForDate || latestVersionForDate
+      let prevSnapshotFlights: FlightEntry[] = []
+      if (previousVersion?.snapshotJson) {
+        try {
+          const parsedPrev = JSON.parse(previousVersion.snapshotJson) as FlightEntry[]
+          if (Array.isArray(parsedPrev)) prevSnapshotFlights = parsedPrev
+        } catch {
+          prevSnapshotFlights = []
+        }
+      }
+      const changeRows: FlightEntry[] = []
+      const nowTs = Date.now().toString(36)
+      const pushChange = (payload: {
+        changeType: string
+        changeField: string
+        changeBefore: string
+        changeAfter: string
+        changeFlightKey: string
+        flightNo?: string
+        aircraft?: string
+        origin?: string
+        destination?: string
+        depTime?: string
+        arrTime?: string
+        pic?: string
+        sic?: string
+        ca?: string
+      }) => {
+        changeRows.push({
+          id: `schchg_${nowTs}_${Math.random().toString(36).slice(2, 7)}`,
+          createdAt: now,
+          recordType: "scheduleChange",
+          scheduleDate,
+          aircraft: payload.aircraft || "",
+          flightNo: payload.flightNo || "",
+          origin: payload.origin || "",
+          destination: payload.destination || "",
+          depTime: payload.depTime || "",
+          arrTime: payload.arrTime || "",
+          pic: payload.pic || "",
+          sic: payload.sic || "",
+          ca: payload.ca || "",
+          pax: "",
+          remarks: "",
+          releaseVersion: resolvedReleaseVersion,
+          releaseBy: resolvedReleaseBy,
+          releaseTime: resolvedReleaseTime,
+          uploadFileName: file.name,
+          isInitialSchedule: thisImportIsInitial ? "Yes" : "No",
+          previousVersionId: previousVersion?.id || "",
+          ...payload,
+        })
+      }
+      const byFlight = (list: FlightEntry[]) => {
+        const map = new Map<string, FlightEntry[]>()
+        list.forEach((f) => {
+          const key = normalizeFlightNo(f.flightNo || "")
+          if (!key) return
+          const arr = map.get(key) ?? []
+          arr.push(f)
+          map.set(key, arr)
+        })
+        return map
+      }
+      const routeKey = (f: FlightEntry) =>
+        `${(f.origin || "").trim().toUpperCase()}-${(f.destination || "").trim().toUpperCase()}`
+      const normalizeCrew = (f: FlightEntry) => `${crew4(f.pic)}|${crew4(f.sic)}|${crew4(f.ca)}`
+
+      const prevByFlight = byFlight(prevSnapshotFlights)
+      const nextByFlight = byFlight(entries)
+      const allFlightNos = new Set<string>([...prevByFlight.keys(), ...nextByFlight.keys()])
+
+      allFlightNos.forEach((flightNoKey) => {
+        const prevList = prevByFlight.get(flightNoKey) ?? []
+        const nextList = nextByFlight.get(flightNoKey) ?? []
+
+        if (!prevList.length && nextList.length) {
+          nextList.forEach((next) => {
+            pushChange({
+              changeType: "Added",
+              changeField: "Additional Flight",
+              changeBefore: "-",
+              changeAfter: `${next.origin}-${next.destination} ${next.depTime}-${next.arrTime}`,
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo,
+              aircraft: next.aircraft,
+              origin: next.origin,
+              destination: next.destination,
+              depTime: next.depTime,
+              arrTime: next.arrTime,
+              pic: next.pic,
+              sic: next.sic,
+              ca: next.ca,
+            })
+          })
+          return
+        }
+        if (prevList.length && !nextList.length) {
+          prevList.forEach((prev) => {
+            pushChange({
+              changeType: "Removed",
+              changeField: "Removed Flight",
+              changeBefore: `${prev.origin}-${prev.destination} ${prev.depTime}-${prev.arrTime}`,
+              changeAfter: "-",
+              changeFlightKey: flightNoKey,
+              flightNo: prev.flightNo,
+              aircraft: prev.aircraft,
+              origin: prev.origin,
+              destination: prev.destination,
+              depTime: prev.depTime,
+              arrTime: prev.arrTime,
+              pic: prev.pic,
+              sic: prev.sic,
+              ca: prev.ca,
+            })
+          })
+          return
+        }
+
+        const usedNext = new Set<number>()
+        prevList.forEach((prev) => {
+          const prevRoute = routeKey(prev)
+          let bestIdx = -1
+          for (let i = 0; i < nextList.length; i++) {
+            if (usedNext.has(i)) continue
+            if (routeKey(nextList[i]) === prevRoute) {
+              bestIdx = i
+              break
+            }
+          }
+          if (bestIdx < 0) {
+            for (let i = 0; i < nextList.length; i++) {
+              if (!usedNext.has(i)) {
+                bestIdx = i
+                break
+              }
+            }
+          }
+          if (bestIdx < 0) return
+          usedNext.add(bestIdx)
+          const next = nextList[bestIdx]
+
+          if (routeKey(next) !== prevRoute) {
+            pushChange({
+              changeType: "Updated",
+              changeField: "Route Change",
+              changeBefore: prevRoute,
+              changeAfter: routeKey(next),
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo || prev.flightNo,
+              aircraft: next.aircraft || prev.aircraft,
+              origin: next.origin || prev.origin,
+              destination: next.destination || prev.destination,
+              depTime: next.depTime || prev.depTime,
+              arrTime: next.arrTime || prev.arrTime,
+              pic: next.pic || prev.pic,
+              sic: next.sic || prev.sic,
+              ca: next.ca || prev.ca,
+            })
+          }
+          if ((prev.depTime || "").trim() !== (next.depTime || "").trim() || (prev.arrTime || "").trim() !== (next.arrTime || "").trim()) {
+            pushChange({
+              changeType: "Updated",
+              changeField: "Time Change",
+              changeBefore: `${prev.depTime}-${prev.arrTime}`,
+              changeAfter: `${next.depTime}-${next.arrTime}`,
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo || prev.flightNo,
+              aircraft: next.aircraft || prev.aircraft,
+              origin: next.origin || prev.origin,
+              destination: next.destination || prev.destination,
+              depTime: next.depTime || prev.depTime,
+              arrTime: next.arrTime || prev.arrTime,
+              pic: next.pic || prev.pic,
+              sic: next.sic || prev.sic,
+              ca: next.ca || prev.ca,
+            })
+          }
+          if ((prev.aircraft || "").trim() !== (next.aircraft || "").trim()) {
+            pushChange({
+              changeType: "Updated",
+              changeField: "Aircraft Change",
+              changeBefore: (prev.aircraft || "-").trim() || "-",
+              changeAfter: (next.aircraft || "-").trim() || "-",
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo || prev.flightNo,
+              aircraft: next.aircraft || prev.aircraft,
+              origin: next.origin || prev.origin,
+              destination: next.destination || prev.destination,
+              depTime: next.depTime || prev.depTime,
+              arrTime: next.arrTime || prev.arrTime,
+              pic: next.pic || prev.pic,
+              sic: next.sic || prev.sic,
+              ca: next.ca || prev.ca,
+            })
+          }
+
+          const prevCrew = normalizeCrew(prev)
+          const nextCrew = normalizeCrew(next)
+          if (prevCrew !== nextCrew) {
+            const prevCrewBlank = prevCrew === "|||"
+            const nextCrewBlank = nextCrew === "|||"
+            const crewField = prevCrewBlank || nextCrewBlank ? "Crew Removed" : "Crew Change"
+            pushChange({
+              changeType: "Updated",
+              changeField: crewField,
+              changeBefore: `PIC:${prev.pic || "-"} SIC:${prev.sic || "-"} CA:${prev.ca || "-"}`,
+              changeAfter: `PIC:${next.pic || "-"} SIC:${next.sic || "-"} CA:${next.ca || "-"}`,
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo || prev.flightNo,
+              aircraft: next.aircraft || prev.aircraft,
+              origin: next.origin || prev.origin,
+              destination: next.destination || prev.destination,
+              depTime: next.depTime || prev.depTime,
+              arrTime: next.arrTime || prev.arrTime,
+              pic: next.pic || prev.pic,
+              sic: next.sic || prev.sic,
+              ca: next.ca || prev.ca,
+            })
+          }
+          if ((prev.aircraft || "").trim() !== (next.aircraft || "").trim() && prevCrew === nextCrew && prevCrew !== "|||") {
+            pushChange({
+              changeType: "Updated",
+              changeField: "Crew Aircraft Change",
+              changeBefore: (prev.aircraft || "-").trim() || "-",
+              changeAfter: (next.aircraft || "-").trim() || "-",
+              changeFlightKey: flightNoKey,
+              flightNo: next.flightNo || prev.flightNo,
+              aircraft: next.aircraft || prev.aircraft,
+              origin: next.origin || prev.origin,
+              destination: next.destination || prev.destination,
+              depTime: next.depTime || prev.depTime,
+              arrTime: next.arrTime || prev.arrTime,
+              pic: next.pic || prev.pic,
+              sic: next.sic || prev.sic,
+              ca: next.ca || prev.ca,
+            })
+          }
+        })
+
+        nextList.forEach((next, idx) => {
+          if (usedNext.has(idx)) return
+          pushChange({
+            changeType: "Added",
+            changeField: "Additional Flight",
+            changeBefore: "-",
+            changeAfter: `${next.origin}-${next.destination} ${next.depTime}-${next.arrTime}`,
+            changeFlightKey: flightNoKey,
+            flightNo: next.flightNo,
+            aircraft: next.aircraft,
+            origin: next.origin,
+            destination: next.destination,
+            depTime: next.depTime,
+            arrTime: next.arrTime,
+            pic: next.pic,
+            sic: next.sic,
+            ca: next.ca,
+          })
+        })
+      })
+      const versionRecord: FlightEntry = {
+        id: `schver_${nowTs}_${Math.random().toString(36).slice(2, 7)}`,
+        createdAt: now,
+        recordType: "scheduleVersion",
+        scheduleDate,
+        aircraft: "",
+        flightNo: "",
+        origin: "",
+        destination: "",
+        depTime: "",
+        arrTime: "",
+        pic: "",
+        sic: "",
+        ca: "",
+        pax: String(entries.length),
+        remarks: `Imported ${entries.length} legs`,
+        releaseVersion: resolvedReleaseVersion,
+        releaseBy: resolvedReleaseBy,
+        releaseTime: resolvedReleaseTime,
+        uploadFileName: file.name,
+        isInitialSchedule: thisImportIsInitial ? "Yes" : "No",
+        previousVersionId: previousVersion?.id || "",
+        snapshotJson: JSON.stringify(entries),
+      }
+      const keep = allFlights.filter((row) => {
+        const rt = (row.recordType || "").trim().toLowerCase()
+        if (rt === "flight" || rt === "") return (row.scheduleDate || "").trim() !== scheduleDate
+        return true
+      })
+      setFlights([...entries, versionRecord, ...changeRows, ...keep])
       setWarnings(warns)
       setLastImported({
         fileName: file.name,
@@ -731,7 +1569,7 @@ export default function OpsControlTimeline(props: {
         releaseVersion: resolvedReleaseVersion,
         releaseBy: resolvedReleaseBy,
         releaseTime: resolvedReleaseTime,
-        isInitial: isInitialSchedule,
+        isInitial: thisImportIsInitial,
       })
       setReleaseBy(resolvedReleaseBy)
       setReleaseTime(resolvedReleaseTime)
@@ -749,7 +1587,7 @@ export default function OpsControlTimeline(props: {
     if (file) {
       const today = new Date()
       const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
-      if (scheduleDate > todayKey && !isInitialSchedule) {
+      if (scheduleDate > todayKey && releaseVersion !== "Initial") {
         setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
         e.currentTarget.value = ""
         return
@@ -766,7 +1604,7 @@ export default function OpsControlTimeline(props: {
     if (file) {
       const today = new Date()
       const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
-      if (scheduleDate > todayKey && !isInitialSchedule) {
+      if (scheduleDate > todayKey && releaseVersion !== "Initial") {
         setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
         return
       }
@@ -803,10 +1641,27 @@ export default function OpsControlTimeline(props: {
     )
     return map
   }, [flights])
+  const mxByAircraft = useMemo(() => {
+    const map = new Map<string, FlightEntry[]>()
+    mxRows.forEach((m) => {
+      const tail = (m.aircraft || "").trim()
+      if (!tail) return
+      const list = map.get(tail) ?? []
+      list.push(m)
+      map.set(tail, list)
+    })
+    map.forEach((list) =>
+      list.sort(
+        (a, b) =>
+          (parseTimeToMin(a.depTime) ?? 0) - (parseTimeToMin(b.depTime) ?? 0),
+      ),
+    )
+    return map
+  }, [mxRows])
 
   // ----- Trip-group detection -----
   // Returns a Map<flightId, groupId>. Two flights share a groupId when they
-  // belong to the same round-trip. Three patterns are supported:
+  // belong to the same round-trip. Supported patterns:
   //   1. Same flight number on the same aircraft, multiple legs ("combined"
   //      flight, e.g. 7000 / 7000 making MLE→X→MLE).
   //   2. Pair of consecutive even/odd numbers on the same aircraft (e.g.
@@ -850,32 +1705,6 @@ export default function OpsControlTimeline(props: {
         if (partner) {
           const lower = Math.min(num, partnerNum)
           const gid = `pair:${f.aircraft}:${lower}`
-          groups.set(f.id, gid)
-          groups.set(partner.id, gid)
-          return
-        }
-      }
-
-      // Pattern 4: route-based fallback. If the flight is an MLE outbound
-      // (MLE→X) and there's a later leg on the same aircraft returning
-      // X→MLE, treat them as one trip even when their flight numbers
-      // don't follow patterns 1 or 2. Catches custom number schemes.
-      const o = (f.origin || "").trim().toUpperCase()
-      const d = (f.destination || "").trim().toUpperCase()
-      const fDep = parseTimeToMin(f.depTime)
-      if (o === "MLE" && d && d !== "MLE" && fDep != null) {
-        const partner = flights.find((x) => {
-          if (x.aircraft !== f.aircraft) return false
-          if (x.id === f.id) return false
-          if (groups.has(x.id)) return false
-          const xo = (x.origin || "").trim().toUpperCase()
-          const xd = (x.destination || "").trim().toUpperCase()
-          if (xo !== d || xd !== "MLE") return false
-          const xDep = parseTimeToMin(x.depTime)
-          return xDep != null && xDep >= fDep
-        })
-        if (partner) {
-          const gid = `route:${f.aircraft}:${d}:${f.id}`
           groups.set(f.id, gid)
           groups.set(partner.id, gid)
           return
@@ -996,26 +1825,6 @@ export default function OpsControlTimeline(props: {
       routeConflicts,
     }
   }, [flights])
-  const avgServiceByAircraft = useMemo(() => {
-    const map = new Map<string, { totalMin: number; legs: number }>()
-    flights.forEach((f) => {
-      const tail = (f.aircraft || "").trim()
-      if (!tail) return
-      const durMin = flightDurationMin(f.depTime, f.arrTime)
-      const entry = map.get(tail) ?? { totalMin: 0, legs: 0 }
-      entry.totalMin += Math.max(durMin, 0)
-      entry.legs += 1
-      map.set(tail, entry)
-    })
-    return [...map.entries()]
-      .map(([tail, v]) => ({
-        tail,
-        avgHrs: v.legs > 0 ? v.totalMin / v.legs / 60 : 0,
-        legs: v.legs,
-      }))
-      .sort((a, b) => b.avgHrs - a.avgHrs)
-  }, [flights])
-
   // Local copy-state for the brief's clipboard button.
   const [briefCopied, setBriefCopied] = useState(false)
   // Which MLE event timeline drives the free-window list:
@@ -1025,6 +1834,27 @@ export default function OpsControlTimeline(props: {
   const [breakMode, setBreakMode] = useState<"dep" | "arr" | "both">("dep")
   const [breakWindowEnabled, setBreakWindowEnabled] = useState(false)
   const [conflictWindowEnabled, setConflictWindowEnabled] = useState(false)
+  const currentDateVersionRows = useMemo(
+    () => versionRows.filter((v) => (v.scheduleDate || "").trim() === scheduleDate).slice(0, 10),
+    [versionRows, scheduleDate],
+  )
+  const currentDateChangeRows = useMemo(
+    () => scheduleChangeRows.filter((v) => (v.scheduleDate || "").trim() === scheduleDate),
+    [scheduleChangeRows, scheduleDate],
+  )
+
+  useEffect(() => {
+    const hasCurrentData =
+      currentDateVersionRows.length > 0 ||
+      flights.length > 0 ||
+      currentDateChangeRows.length > 0
+    if (hasCurrentData) return
+    if (!versionRows.length) return
+    const latestDate = (versionRows[0].scheduleDate || "").trim()
+    if (latestDate && latestDate !== scheduleDate) {
+      setScheduleDate(latestDate)
+    }
+  }, [currentDateChangeRows.length, currentDateVersionRows.length, flights.length, scheduleDate, versionRows])
 
   // Horizontal pixel density. Aircraft are rows; time flows left → right.
   const PIXELS_PER_HOUR = useMemo(() => {
@@ -1170,34 +2000,178 @@ export default function OpsControlTimeline(props: {
     return palette[h % palette.length]
   }
 
+  if (view === "mxTypeManager") {
+    return (
+      <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
+        <div className="card-body">
+          <div className="h6 fw-semibold mb-3">MX Type Manager</div>
+          <div className="d-flex justify-content-end mb-2">
+            <button type="button" className="btn btn-sm btn-primary" onClick={openNewMxConfig}>
+              New MX Setup
+            </button>
+          </div>
+          <div style={{ maxHeight: 360, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+            <table className="table table-sm mb-0" style={{ fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th>MX Type</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                  <th>Min</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mxConfigRows.length ? (
+                  mxConfigRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.mxType || "-"}</td>
+                      <td>{row.remarks || "-"}</td>
+                      <td>{row.reason || "-"}</td>
+                      <td>{row.defaultDurationMin || "-"}</td>
+                      <td className="d-flex gap-1">
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-primary py-0 px-2"
+                          onClick={() => openEditMxConfig(row)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-outline-danger py-0 px-2"
+                          onClick={() => deleteMxConfig(row.id)}
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="text-muted">No MX setup rows yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {mxSetupModal ? (
+            <div
+              className="modal show d-block"
+              tabIndex={-1}
+              style={{ background: "rgba(0,0,0,0.5)" }}
+              onClick={() => setMxSetupModal(false)}
+            >
+              <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+                  <div className="modal-header border-0 pb-0">
+                    <h5 className="modal-title">{editingMxConfigId ? "Edit MX Setup" : "New MX Setup"}</h5>
+                    <button className="btn btn-sm btn-light" onClick={() => setMxSetupModal(false)}>
+                      Close
+                    </button>
+                  </div>
+                  <div className="modal-body">
+                    <div className="row g-2">
+                      <div className="col-sm-6">
+                        <label className="form-label small fw-semibold mb-1">MX Type</label>
+                        <input
+                          type="text"
+                          className="form-control form-control-sm"
+                          value={mxConfigForm.mxType}
+                          onChange={(e) => setMxConfigForm((p) => ({ ...p, mxType: e.target.value }))}
+                        />
+                      </div>
+                      <div className="col-sm-6">
+                        <label className="form-label small fw-semibold mb-1">Status</label>
+                        <select
+                          className="form-select form-select-sm"
+                          value={mxConfigForm.mxSchedule}
+                          onChange={(e) => setMxConfigForm((p) => ({ ...p, mxSchedule: e.target.value }))}
+                        >
+                          <option value="Schedule">Schedule</option>
+                          <option value="No Schedule">No Schedule</option>
+                        </select>
+                      </div>
+                      <div className="col-sm-8">
+                        <label className="form-label small fw-semibold mb-1">Reason</label>
+                        <input
+                          type="text"
+                          className="form-control form-control-sm"
+                          value={mxConfigForm.reason}
+                          onChange={(e) => setMxConfigForm((p) => ({ ...p, reason: e.target.value }))}
+                        />
+                      </div>
+                      <div className="col-sm-4">
+                        <label className="form-label small fw-semibold mb-1">Min</label>
+                        <input
+                          type="number"
+                          min={1}
+                          className="form-control form-control-sm"
+                          value={mxConfigForm.defaultDurationMin}
+                          onChange={(e) => setMxConfigForm((p) => ({ ...p, defaultDurationMin: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="modal-footer border-0">
+                    <button className="btn btn-light" onClick={() => setMxSetupModal(false)}>
+                      Cancel
+                    </button>
+                    <button className="btn btn-primary" onClick={saveMxConfig}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="d-flex flex-column gap-3">
       {/* ----- Upload card ----- */}
       <div className="card border-0 shadow-sm" style={{ borderRadius: 12 }}>
         <div className="card-body">
           <div className="d-flex align-items-center justify-content-between gap-2 flex-wrap">
-            <h2 className="h6 fw-semibold mb-0 d-flex align-items-center gap-2">
-              <span
-                className="d-inline-flex align-items-center justify-content-center rounded"
-                style={{
-                  width: 28,
-                  height: 28,
-                  background: "#dbeafe",
-                  color: "#1d4ed8",
-                }}
+            <div className="d-flex align-items-center gap-2 flex-wrap">
+              <div className="d-flex align-items-center gap-2 me-1">
+                <label className="small fw-semibold mb-0">Date</label>
+                <input
+                  type="date"
+                  className="form-control form-control-sm"
+                  style={{ width: 160 }}
+                  value={scheduleDate}
+                  onChange={(e) => setScheduleDate(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
+                onClick={() => setShowScheduleVersions((v) => !v)}
               >
-                <Upload size={15} />
-              </span>
-              Import flight schedule
-            </h2>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm d-flex align-items-center gap-1"
-              onClick={() => setIsImportModalOpen(true)}
-            >
-              <Upload size={14} />
-              Import
-            </button>
+                <FileText size={14} />
+                {showScheduleVersions ? "Hide Schedule Versions" : "Show Schedule Versions"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
+                onClick={() => setShowUploadedTable((v) => !v)}
+              >
+                <FileText size={14} />
+                {showUploadedTable ? "Hide AAOC (Current Version)" : "Show AAOC (Current Version)"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
+                onClick={() => setShowComparisonLog((v) => !v)}
+              >
+                <FileText size={14} />
+                {showComparisonLog ? "Hide Comparison Log" : "Show Comparison Log"}
+              </button>
+            </div>
           </div>
           <input
             ref={fileInputRef}
@@ -1206,6 +2180,145 @@ export default function OpsControlTimeline(props: {
             className="d-none"
             onChange={onPickFile}
           />
+          {showScheduleVersions ? (
+          <div className="mt-3">
+            <div className="small fw-semibold mb-1">Schedule Versions ({scheduleDate})</div>
+            <div style={{ maxHeight: 180, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+              <table className="table table-sm mb-0">
+                <thead>
+                  <tr>
+                    <th>Version</th>
+                    <th>By</th>
+                    <th>Time</th>
+                    <th>Legs</th>
+                    <th>Initial</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {currentDateVersionRows.length ? (
+                    currentDateVersionRows.map((v) => (
+                      <tr key={v.id}>
+                        <td>{v.releaseVersion || "-"}</td>
+                        <td>{v.releaseBy || "-"}</td>
+                        <td>{v.releaseTime || "-"}</td>
+                        <td>{v.pax || "-"}</td>
+                        <td>{isInitialVersionFlag(v) ? "Yes" : "No"}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-outline-primary py-0 px-2"
+                            onClick={() => openReuploadForVersion(v)}
+                          >
+                            Re-upload
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={6} className="text-muted">No versions yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          ) : null}
+          {showUploadedTable ? (
+            <div className="mt-3">
+              <div className="small fw-semibold mb-1">AAOC (Current Version)</div>
+              <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                <table className="table table-sm mb-0" style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>FLT NUMBER</th>
+                      <th>AIRCRAFT REG</th>
+                      <th>FROM</th>
+                      <th>TO</th>
+                      <th>STD</th>
+                      <th>STA</th>
+                      <th>PIC</th>
+                      <th>SIC</th>
+                      <th>C/A</th>
+                      <th>EMB</th>
+                      <th>DEMB</th>
+                      <th>REMARKS</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {flights.length ? (
+                      flights.map((row) => (
+                        <tr key={row.id}>
+                          <td className="fw-semibold">{row.flightNo || "-"}</td>
+                          <td>{row.aircraft || "-"}</td>
+                          <td>{row.origin || "-"}</td>
+                          <td>{row.destination || "-"}</td>
+                          <td>{row.depTime || "-"}</td>
+                          <td>{row.arrTime || "-"}</td>
+                          <td>{row.pic || "-"}</td>
+                          <td>{row.sic || "-"}</td>
+                          <td>{row.ca || "-"}</td>
+                          <td>{row.emb || "-"}</td>
+                          <td>{row.demb || "-"}</td>
+                          <td>{row.remarks || "-"}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={12} className="text-muted">No uploaded rows for selected date.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+          {showComparisonLog ? (
+            <div className="mt-3">
+              <div className="small fw-semibold mb-1">Comparison Log (All Uploads for {scheduleDate})</div>
+              <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                <table className="table table-sm mb-0" style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th>Version</th>
+                      <th>Flight</th>
+                      <th>Type</th>
+                      <th>Change</th>
+                      <th>Route</th>
+                      <th>Timing</th>
+                      <th>Aircraft</th>
+                      <th>Crew</th>
+                      <th>Before</th>
+                      <th>After</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentDateChangeRows.length ? (
+                      currentDateChangeRows.map((row) => (
+                        <tr key={row.id}>
+                          <td>{row.releaseVersion || "-"}</td>
+                          <td className="fw-semibold">{row.flightNo || "-"}</td>
+                          <td>{row.changeType || "-"}</td>
+                          <td>{row.changeField || "-"}</td>
+                          <td>{row.origin && row.destination ? `${row.origin}-${row.destination}` : "-"}</td>
+                          <td>{row.depTime && row.arrTime ? `${row.depTime}-${row.arrTime}` : "-"}</td>
+                          <td>{row.aircraft || "-"}</td>
+                          <td className="small">PIC:{row.pic || "-"} SIC:{row.sic || "-"} CA:{row.ca || "-"}</td>
+                          <td className="small">{row.changeBefore || "-"}</td>
+                          <td className="small">{row.changeAfter || "-"}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={10} className="text-muted">No comparisons logged yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
           {errorMsg ? (
             <div className="alert alert-danger small d-flex align-items-start gap-2 mt-3 mb-0">
               <AlertTriangle size={16} className="mt-1" />
@@ -1222,20 +2335,151 @@ export default function OpsControlTimeline(props: {
               </div>
             </div>
           ) : null}
-          {lastImported ? (
-              <div className="alert alert-success small d-flex align-items-start gap-2 mt-3 mb-0">
-              <CheckCircle2 size={16} className="mt-1" />
-              <div>
-                Imported {lastImported.count} flight legs from{" "}
-                <strong>{lastImported.fileName}</strong> at {lastImported.at}. Release:{" "}
-                <strong>{lastImported.releaseVersion}</strong> · {lastImported.releaseTime} ·{" "}
-                {lastImported.releaseBy}
-                {lastImported.isInitial ? " · Initial schedule" : ""}
-              </div>
-            </div>
-          ) : null}
         </div>
       </div>
+
+      {isMxModalOpen ? (
+        <div
+          className="modal show d-block"
+          tabIndex={-1}
+          style={{ background: "rgba(0,0,0,0.5)" }}
+          onClick={() => setIsMxModalOpen(false)}
+        >
+          <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+              <div className="modal-header border-0 pb-0">
+                <h5 className="modal-title">Maintenance (MX)</h5>
+                <button className="btn btn-sm btn-light" onClick={() => setIsMxModalOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="row g-2">
+                  <div className="col-sm-6">
+                    <label className="form-label small fw-semibold mb-1">Aircraft</label>
+                    <select
+                      className="form-select form-select-sm"
+                      value={mxForm.aircraft}
+                      onChange={(e) => setMxForm((p) => ({ ...p, aircraft: e.target.value }))}
+                    >
+                      <option value="">Select aircraft</option>
+                      {aircraftList.map((a) => (
+                        <option key={a} value={a}>
+                          {a}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-sm-6">
+                    <label className="form-label small fw-semibold mb-1">MX Type</label>
+                    <select
+                      className="form-select form-select-sm"
+                      value={mxForm.mxType}
+                      onChange={(e) => setMxForm((p) => ({ ...p, mxType: e.target.value }))}
+                    >
+                      {mxTypeOptions.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-sm-6">
+                    <label className="form-label small fw-semibold mb-1">Status</label>
+                    <select
+                      className="form-select form-select-sm"
+                      value={mxForm.mxSchedule}
+                      onChange={(e) => setMxForm((p) => ({ ...p, mxSchedule: e.target.value }))}
+                    >
+                      <option value="Schedule">Schedule</option>
+                      <option value="No Schedule">No Schedule</option>
+                    </select>
+                  </div>
+                  <div className="col-sm-6">
+                    <label className="form-label small fw-semibold mb-1">Reason</label>
+                    <select
+                      className="form-select form-select-sm"
+                      value={mxForm.reason}
+                      onChange={(e) => {
+                        const reason = e.target.value
+                        const cfg = mxConfigRows.find((x) => (x.reason || "").trim() === reason)
+                        const picked = mxReasons.find((x) => x.reason === reason)
+                        const mins = picked?.duration ?? Number(mxForm.defaultDurationMin || "120")
+                        setMxForm((p) => ({
+                          ...p,
+                          mxType: (cfg?.mxType || p.mxType || "Line").trim(),
+                          mxSchedule: (cfg?.remarks || p.mxSchedule || "Schedule").trim(),
+                          reason,
+                          defaultDurationMin: String(mins),
+                          endTime: applyMxDuration(p.startTime, mins) || p.endTime,
+                        }))
+                      }}
+                    >
+                      <option value="">Select reason</option>
+                      {mxReasons.map((r) => (
+                        <option key={r.reason} value={r.reason}>
+                          {r.reason} ({r.duration}m)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">Default Duration (min)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      className="form-control form-control-sm"
+                      value={mxForm.defaultDurationMin}
+                      onChange={(e) => {
+                        const mins = Number(e.target.value || "0")
+                        setMxForm((p) => ({
+                          ...p,
+                          defaultDurationMin: e.target.value,
+                          endTime: applyMxDuration(p.startTime, mins) || p.endTime,
+                        }))
+                      }}
+                    />
+                  </div>
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">Start</label>
+                    <input
+                      type="time"
+                      className="form-control form-control-sm"
+                      value={mxForm.startTime}
+                      onChange={(e) => {
+                        const startTime = e.target.value
+                        const mins = Number(mxForm.defaultDurationMin || "0")
+                        setMxForm((p) => ({
+                          ...p,
+                          startTime,
+                          endTime: applyMxDuration(startTime, mins) || p.endTime,
+                        }))
+                      }}
+                    />
+                  </div>
+                  <div className="col-sm-4">
+                    <label className="form-label small fw-semibold mb-1">End</label>
+                    <input
+                      type="time"
+                      className="form-control form-control-sm"
+                      value={mxForm.endTime}
+                      onChange={(e) => setMxForm((p) => ({ ...p, endTime: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="modal-footer border-0">
+                <button className="btn btn-light" onClick={() => setIsMxModalOpen(false)}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" onClick={saveMxEntry}>
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isImportModalOpen ? (
         <div
@@ -1266,13 +2510,17 @@ export default function OpsControlTimeline(props: {
                 <div className="row g-2 mb-3">
                   <div className="col-sm-4">
                     <label className="form-label small fw-semibold mb-1">Release version</label>
-                    <input
-                      type="text"
+                    <select
                       className="form-control form-control-sm"
                       value={releaseVersion}
                       onChange={(e) => setReleaseVersion(e.target.value)}
-                      placeholder="Initial / Rev1"
-                    />
+                    >
+                      {releaseVersionOptions.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="col-sm-4">
                     <label className="form-label small fw-semibold mb-1">Release time</label>
@@ -1294,17 +2542,8 @@ export default function OpsControlTimeline(props: {
                     />
                   </div>
                   <div className="col-12">
-                    <label className="d-flex align-items-center gap-2 small fw-semibold mb-0">
-                      <input
-                        type="checkbox"
-                        className="form-check-input mt-0"
-                        checked={isInitialSchedule}
-                        onChange={(e) => setIsInitialSchedule(e.target.checked)}
-                      />
-                      Initial schedule
-                    </label>
                     <div className="text-muted small mt-1">
-                      For future schedule dates (e.g., tomorrow), Initial schedule must be enabled before import.
+                      Version flow by date: first upload is Initial, then REV1, REV2, REV3, then Final.
                     </div>
                   </div>
                 </div>
@@ -1663,21 +2902,18 @@ export default function OpsControlTimeline(props: {
                   )}
                 </div>
 
-                {/* Average service hrs by aircraft (moved to right side) */}
                 <div className="col-md-6">
                   <div className="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
                     <div className="fw-semibold small d-flex align-items-center gap-2">
-                      <Clock size={14} color="#1d4ed8" />
-                      Average service hrs by aircraft
+                      <Clock size={14} color="#0f766e" />
+                      MX Log
                     </div>
-                    <span className="badge bg-primary-subtle text-primary-emphasis">
-                      {avgServiceByAircraft.length}
+                    <span className="badge bg-info-subtle text-info-emphasis">
+                      {mxRows.length}
                     </span>
                   </div>
-                  {avgServiceByAircraft.length === 0 ? (
-                    <div className="text-muted small fst-italic">
-                      No aircraft timing data available.
-                    </div>
+                  {mxRows.length === 0 ? (
+                    <div className="text-muted small fst-italic">No MX records for selected date.</div>
                   ) : (
                     <div
                       className="rounded"
@@ -1687,23 +2923,43 @@ export default function OpsControlTimeline(props: {
                         overflow: "auto",
                       }}
                     >
-                      <table
-                        className="table table-sm align-middle mb-0"
-                        style={{ fontSize: 12 }}
-                      >
+                      <table className="table table-sm align-middle mb-0" style={{ fontSize: 12 }}>
                         <thead>
                           <tr className="text-uppercase small text-muted">
                             <th>Aircraft</th>
-                            <th className="text-end">Avg hrs</th>
-                            <th className="text-end">Legs</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Reason</th>
+                            <th>Start</th>
+                            <th>End</th>
+                            <th>Action</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {avgServiceByAircraft.map((row) => (
-                            <tr key={row.tail}>
-                              <td className="fw-semibold">{row.tail}</td>
-                              <td className="text-end">{row.avgHrs.toFixed(2)}</td>
-                              <td className="text-end">{row.legs}</td>
+                          {mxRows.map((m) => (
+                            <tr key={m.id}>
+                              <td className="fw-semibold">{m.aircraft || "-"}</td>
+                              <td>{m.mxType || "-"}</td>
+                              <td>{m.remarks || "-"}</td>
+                              <td>{m.reason || "-"}</td>
+                              <td>{m.depTime || "-"}</td>
+                              <td>{m.arrTime || "-"}</td>
+                              <td className="d-flex gap-1">
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-outline-primary py-0 px-2"
+                                  onClick={() => openEditMxModal(m)}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-outline-danger py-0 px-2"
+                                  onClick={() => deleteMxEntry(m.id)}
+                                >
+                                  Delete
+                                </button>
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -1840,15 +3096,18 @@ export default function OpsControlTimeline(props: {
               </div>
               <button
                 type="button"
-                className={`btn btn-sm d-flex align-items-center gap-1 ${
-                  showCrew ? "btn-primary" : "btn-outline-secondary"
-                }`}
-                onClick={() => setShowCrew((v) => !v)}
-                title={showCrew ? "Hide crew codes" : "Show crew codes"}
+                className="btn btn-sm btn-primary d-flex align-items-center gap-1"
+                onClick={() => setIsImportModalOpen(true)}
               >
-                {showCrew ? <Eye size={14} /> : <EyeOff size={14} />}
-                <Users size={14} />
-                {showCrew ? "Crew on" : "Crew off"}
+                <Upload size={14} />
+                Import
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-primary"
+                onClick={openMxModal}
+              >
+                MX
               </button>
               {flights.length > 0 ? (
                 <button
@@ -1868,6 +3127,18 @@ export default function OpsControlTimeline(props: {
                   Clear
                 </button>
               ) : null}
+              <button
+                type="button"
+                className={`btn btn-sm d-flex align-items-center gap-1 ${
+                  showCrew ? "btn-primary" : "btn-outline-secondary"
+                }`}
+                onClick={() => setShowCrew((v) => !v)}
+                title={showCrew ? "Hide crew codes" : "Show crew codes"}
+              >
+                {showCrew ? <Eye size={14} /> : <EyeOff size={14} />}
+                <Users size={14} />
+                {showCrew ? "Crew on" : "Crew off"}
+              </button>
             </div>
           </div>
 
@@ -1969,6 +3240,7 @@ export default function OpsControlTimeline(props: {
                     {/* ===== Body: aircraft labels (sticky left) + flight rows ===== */}
                     {aircraftList.map((tail) => {
                       const lanes = flightsByAircraft.get(tail) ?? []
+                      const mxLanes = mxByAircraft.get(tail) ?? []
                       const c = colorForAircraft(tail)
                       return (
                         <div
@@ -2145,85 +3417,92 @@ export default function OpsControlTimeline(props: {
 
                               return (
                                 <>
-                                  {/* Trip-group connector: bars in the same
-                                      group (same flight number across legs,
-                                      or even/odd pair) on this aircraft are
-                                      stitched together with a single thin
-                                      line at the bottom. */}
+                                  {/* Connector line for exact Flight Number and even/odd flight pairs. */}
                                   {(() => {
                                     const out: React.ReactNode[] = []
-                                    const byGroup = new Map<string, typeof bars>()
+                                    const sameFlightConnectedIds = new Set<string>()
+                                    const byFlightNo = new Map<string, typeof bars>()
                                     bars.forEach((b) => {
-                                      const gid = tripGroups.get(b.f.id) ?? b.f.id
-                                      const list = byGroup.get(gid) ?? []
+                                      const fno = normalizeFlightNo(b.f.flightNo || "")
+                                      if (!fno) return
+                                      const list = byFlightNo.get(fno) ?? []
                                       list.push(b)
-                                      byGroup.set(gid, list)
+                                      byFlightNo.set(fno, list)
                                     })
-                                    byGroup.forEach((list, gid) => {
+                                    byFlightNo.forEach((list, fno) => {
                                       if (list.length < 2) return
-                                      const sorted = [...list].sort(
-                                        (a, b) => a.left - b.left,
-                                      )
-                                      for (let i = 0; i < sorted.length - 1; i++) {
+                                      const sorted = [...list].sort((a, b) => a.left - b.left)
+                                      // Connect consecutive segments of the same flight number,
+                                      // but only when the gap is reasonably close (avoids long chains).
+                                      const MAX_SAME_FLIGHT_GAP_MIN = 6 * 60
+                                      const maxGapPx = (MAX_SAME_FLIGHT_GAP_MIN / 60) * PIXELS_PER_HOUR
+                                      for (let i = 0; i + 1 < sorted.length; i++) {
                                         const A = sorted[i]
                                         const B = sorted[i + 1]
                                         const x1 = A.left + A.width
                                         const x2 = B.left
                                         if (x2 <= x1) continue
-                                        // Bold connector — thicker stroke,
-                                        // foreground-tint colour, and dot
-                                        // caps at each end so the link
-                                        // between segments is unmistakable.
+                                        if (x2 - x1 > maxGapPx) continue
+                                        sameFlightConnectedIds.add(A.f.id)
+                                        sameFlightConnectedIds.add(B.f.id)
                                         out.push(
                                           <div
-                                            key={`conn-${gid}-${i}-line`}
+                                            key={`conn-${tail}-${fno}-${i}-line`}
                                             style={{
                                               position: "absolute",
                                               left: x1,
-                                              top: ROW_H - 9,
+                                              top: ROW_H - 6,
                                               width: x2 - x1,
-                                              height: 3,
+                                              height: 2,
                                               background: c.fg,
-                                              borderRadius: 2,
-                                              opacity: 1,
-                                            }}
-                                          />,
-                                        )
-                                        // Round dot caps anchor the line to
-                                        // each bar so the connector reads as
-                                        // a deliberate stitch, not a stray
-                                        // grid line.
-                                        out.push(
-                                          <div
-                                            key={`conn-${gid}-${i}-capL`}
-                                            style={{
-                                              position: "absolute",
-                                              left: x1 - 3,
-                                              top: ROW_H - 12,
-                                              width: 7,
-                                              height: 7,
-                                              background: c.fg,
-                                              borderRadius: "50%",
-                                              opacity: 1,
-                                            }}
-                                          />,
-                                        )
-                                        out.push(
-                                          <div
-                                            key={`conn-${gid}-${i}-capR`}
-                                            style={{
-                                              position: "absolute",
-                                              left: x2 - 4,
-                                              top: ROW_H - 12,
-                                              width: 7,
-                                              height: 7,
-                                              background: c.fg,
-                                              borderRadius: "50%",
-                                              opacity: 1,
+                                              opacity: 0.8,
                                             }}
                                           />,
                                         )
                                       }
+                                    })
+                                    const numOf = (s: string): number | null => {
+                                      const digits = (s || "").replace(/[^0-9]/g, "")
+                                      if (!digits) return null
+                                      const n = parseInt(digits, 10)
+                                      return Number.isFinite(n) ? n : null
+                                    }
+                                    const byFlightNum = new Map<number, typeof bars>()
+                                    bars.forEach((b) => {
+                                      const n = numOf(b.f.flightNo || "")
+                                      if (n == null) return
+                                      const list = byFlightNum.get(n) ?? []
+                                      list.push(b)
+                                      byFlightNum.set(n, list)
+                                    })
+                                    byFlightNum.forEach((evenList, n) => {
+                                      if (n % 2 !== 0) return
+                                      const oddList = byFlightNum.get(n + 1)
+                                      if (!oddList || !oddList.length || !evenList.length) return
+                                      // Bridge end of even flight to next odd flight (e.g. 7008 -> 7009).
+                                      const evenSorted = [...evenList].sort((a, b) => a.left - b.left)
+                                      const oddSorted = [...oddList].sort((a, b) => a.left - b.left)
+                                      const evenEnd = evenSorted[evenSorted.length - 1]
+                                      let oddStart = oddSorted.find((x) => x.left >= evenEnd.left)
+                                      if (!oddStart) oddStart = oddSorted[0]
+                                      if (!oddStart) return
+                                      const x1 = evenEnd.left + evenEnd.width
+                                      const x2 = oddStart.left
+                                      if (x2 <= x1) return
+                                      out.push(
+                                        <div
+                                          key={`conn-pair-${tail}-${n}-${n + 1}`}
+                                          style={{
+                                            position: "absolute",
+                                            left: x1,
+                                            top: ROW_H - 6,
+                                            width: x2 - x1,
+                                            height: 2,
+                                            background: c.fg,
+                                            opacity: 0.8,
+                                          }}
+                                        />,
+                                      )
                                     })
                                     return out
                                   })()}
@@ -2256,6 +3535,7 @@ export default function OpsControlTimeline(props: {
                                         setDraggingId(f.id)
                                       }}
                                       onDragEnd={() => setDraggingId(null)}
+                                      onClick={() => openSegmentNoteModal(f)}
                                       title={`${f.flightNo} · ${f.origin}${f.destination ? "→" + f.destination : ""} · STD ${f.depTime} / STA ${f.arrTime}${f.pax ? " · " + f.pax + " pax" : ""}`}
                                       style={{
                                         position: "absolute",
@@ -2313,6 +3593,61 @@ export default function OpsControlTimeline(props: {
                                         </div>
                                       ) : null}
                                     </div>
+                                    )
+                                  })}
+                                  {mxLanes.map((m) => {
+                                    const dep = parseTimeToMin(m.depTime || "")
+                                    const arr = parseTimeToMin(m.arrTime || "")
+                                    if (dep == null || arr == null) return null
+                                    let endAbs = arr
+                                    if (arr < dep) endAbs = arr + 24 * 60
+                                    const left =
+                                      ((dep - range.startMin) / 60) * PIXELS_PER_HOUR
+                                    const right =
+                                      ((endAbs - range.startMin) / 60) * PIXELS_PER_HOUR
+                                    const width = Math.max(26, right - left)
+                                    return (
+                                      <div
+                                        key={`mx-${m.id}`}
+                                        onClick={() => setMxDetailModal({ open: true, mxId: m.id })}
+                                        title={`MX ${m.aircraft} · ${m.reason || "-"} · ${m.depTime}-${m.arrTime}`}
+                                        style={{
+                                          position: "absolute",
+                                          left,
+                                          top: 6,
+                                          height: ROW_H - 12,
+                                          width,
+                                          background: "#0f766e",
+                                          color: "#ecfeff",
+                                          border: "1px solid #115e59",
+                                          borderRadius: 0,
+                                          padding: "3px 7px 6px",
+                                          fontSize: 11,
+                                          fontWeight: 600,
+                                          overflow: "hidden",
+                                          lineHeight: 1.15,
+                                          display: "flex",
+                                          flexDirection: "column",
+                                          justifyContent: "center",
+                                          boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
+                                          cursor: "pointer",
+                                          opacity: 0.95,
+                                          zIndex: 2,
+                                        }}
+                                      >
+                                        <div
+                                          className="text-truncate"
+                                          style={{ fontSize: 12, fontWeight: 700 }}
+                                        >
+                                          MX {m.mxType || ""}
+                                        </div>
+                                        <div className="text-truncate" style={{ fontSize: 10, opacity: 0.95 }}>
+                                          {m.reason || "-"} · {m.remarks || "-"}
+                                        </div>
+                                        <div className="text-truncate" style={{ fontSize: 10, opacity: 0.9 }}>
+                                          {m.depTime || "-"} - {m.arrTime || "-"}
+                                        </div>
+                                      </div>
                                     )
                                   })}
                                 </>
@@ -2473,6 +3808,124 @@ export default function OpsControlTimeline(props: {
           )}
         </div>
       </div>
+
+      {segmentNoteModal.open ? (() => {
+        const selected = flights.find((x) => x.id === segmentNoteModal.flightId)
+        if (!selected) return null
+        return (
+          <div
+            className="modal show d-block"
+            tabIndex={-1}
+            style={{ background: "rgba(0,0,0,0.5)" }}
+            onClick={closeSegmentNoteModal}
+          >
+            <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+                <div className="modal-header border-0 pb-0">
+                  <h5 className="modal-title">
+                    {selected.flightNo} · {selected.origin}
+                    {selected.destination ? `→${selected.destination}` : ""} · {selected.depTime}-{selected.arrTime}
+                  </h5>
+                  <button className="btn btn-sm btn-light" onClick={closeSegmentNoteModal}>
+                    Close
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <div className="d-flex gap-2 mb-3">
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${segmentNoteModal.tab === "briefing" ? "btn-primary" : "btn-outline-secondary"}`}
+                      onClick={() => setSegmentNoteModal((prev) => ({ ...prev, tab: "briefing" }))}
+                    >
+                      Crew Briefing
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-sm ${segmentNoteModal.tab === "dispatch" ? "btn-primary" : "btn-outline-secondary"}`}
+                      onClick={() => setSegmentNoteModal((prev) => ({ ...prev, tab: "dispatch" }))}
+                    >
+                      Dispatch Note
+                    </button>
+                  </div>
+                  {segmentNoteModal.tab === "briefing" ? (
+                    <div>
+                      <label className="form-label small fw-semibold">Crew Briefing</label>
+                      <textarea
+                        className="form-control form-control-sm"
+                        rows={6}
+                        value={segmentNoteModal.crewBriefing}
+                        onChange={(e) =>
+                          setSegmentNoteModal((prev) => ({ ...prev, crewBriefing: e.target.value }))
+                        }
+                        placeholder="Add crew briefing for this segment..."
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="form-label small fw-semibold">Dispatch Note</label>
+                      <textarea
+                        className="form-control form-control-sm"
+                        rows={6}
+                        value={segmentNoteModal.dispatchNote}
+                        onChange={(e) =>
+                          setSegmentNoteModal((prev) => ({ ...prev, dispatchNote: e.target.value }))
+                        }
+                        placeholder="Add dispatch note for this segment..."
+                      />
+                    </div>
+                  )}
+                </div>
+                <div className="modal-footer border-0">
+                  <button className="btn btn-light" onClick={closeSegmentNoteModal}>
+                    Cancel
+                  </button>
+                  <button className="btn btn-primary" onClick={saveSegmentNotes}>
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })() : null}
+
+      {mxDetailModal.open ? (() => {
+        const mx = mxRows.find((x) => x.id === mxDetailModal.mxId)
+        if (!mx) return null
+        return (
+          <div
+            className="modal show d-block"
+            tabIndex={-1}
+            style={{ background: "rgba(0,0,0,0.5)" }}
+            onClick={() => setMxDetailModal({ open: false, mxId: "" })}
+          >
+            <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+                <div className="modal-header border-0 pb-0">
+                  <h5 className="modal-title">MX Details</h5>
+                  <button className="btn btn-sm btn-light" onClick={() => setMxDetailModal({ open: false, mxId: "" })}>
+                    Close
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <div className="small text-muted mb-2">Aircraft</div>
+                  <div className="fw-semibold mb-2">{mx.aircraft || "-"}</div>
+                  <div className="small text-muted mb-2">MX Type</div>
+                  <div className="fw-semibold mb-2">{mx.mxType || "-"}</div>
+                  <div className="small text-muted mb-2">Status</div>
+                  <div className="fw-semibold mb-2">{mx.remarks || "-"}</div>
+                  <div className="small text-muted mb-2">Reason</div>
+                  <div className="fw-semibold mb-2">{mx.reason || "-"}</div>
+                  <div className="small text-muted mb-2">Default Duration</div>
+                  <div className="fw-semibold mb-2">{mx.defaultDurationMin || mx.pax || "-"} min</div>
+                  <div className="small text-muted mb-2">Start / End</div>
+                  <div className="fw-semibold">{mx.depTime || "-"} - {mx.arrTime || "-"}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })() : null}
 
       {/* ----- Move flight conflict dialog ----- */}
       {moveDialog ? (() => {

@@ -56,6 +56,7 @@ type ModuleKey =
   | "levelShiftPriority"
   | "rosterPriorityType"
   | "opsControl"
+  | "mxTypeManager"
   | "aircraftReport"
   | "leaveAttendanceControl"
   | "publicHolidays"
@@ -279,6 +280,8 @@ const ACCESS_CONTROL_FLOWS = [
 
   "Daily Ops > Ops Control > View",
   "Daily Ops > Ops Control > Edit",
+  "Daily Ops > MX Type Manager > View",
+  "Daily Ops > MX Type Manager > Edit",
   "Daily Ops > Aircraft Report > View",
   "Daily Ops > Aircraft Report > Edit",
   "Daily Ops > Daily Checklist > View",
@@ -311,6 +314,7 @@ const MODULE_VIEW_FLOW: Record<ModuleKey, string> = {
   levelShiftPriority: "Roster > Level Shift Priority > View",
   rosterPriorityType: "Roster > Roster Priority Type > View",
   opsControl: "Daily Ops > Ops Control > View",
+  mxTypeManager: "Daily Ops > MX Type Manager > View",
   aircraftReport: "Daily Ops > Aircraft Report > View",
   checklist: "Daily Ops > Daily Checklist > View",
   briefing: "Daily Ops > Briefing > View",
@@ -830,6 +834,13 @@ const MODULES: ModuleConfig[] = [
     columns: [],
   },
   {
+    key: "mxTypeManager",
+    title: "MX Type Manager",
+    description: "Manage maintenance types for Ops Control MX workflow.",
+    fields: [],
+    columns: [],
+  },
+  {
     key: "attendance",
     title: "Attendance",
     description: "Review attendance requests from staff portal and process approvals/documents.",
@@ -978,6 +989,7 @@ const NAV_GROUPS: NavGroup[] = [
     icon: Activity,
     items: [
       { key: "opsControl", label: "Ops Control", icon: Settings },
+      { key: "mxTypeManager", label: "MX Type Manager", icon: Settings },
       { key: "aircraftReport", label: "Aircraft Report", icon: TrendingUp },
       { key: "checklist", label: "Daily Checklist", icon: ListChecks },
       { key: "briefing", label: "Briefing", icon: Megaphone },
@@ -1007,6 +1019,7 @@ function getEmptyStore(): DataStore {
     levelShiftPriority: [],
     rosterPriorityType: [],
     opsControl: [],
+    mxTypeManager: [],
     aircraftReport: [],
     leaveAttendanceControl: [],
     publicHolidays: [],
@@ -1405,6 +1418,10 @@ export default function Page() {
   const rosterGridWrapRef = useRef<HTMLDivElement | null>(null)
   const hasLoadedRef = useRef(false)
   const disableRemoteSyncRef = useRef(false)
+  const isOnlineRef = useRef(typeof window === "undefined" ? true : window.navigator.onLine)
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof window === "undefined" ? true : window.navigator.onLine,
+  )
   const [store, setStore] = useState<DataStore>(getEmptyStore)
   const [activeModule, setActiveModule] = useState<ModuleKey>("dashboard")
   const [isFormOpen, setIsFormOpen] = useState(false)
@@ -2730,6 +2747,7 @@ export default function Page() {
     const loadData = async () => {
       if (mounted) setHydrated(true)
       let loaded = false
+      let loadedFromLocalFirst = false
 
       // Prefer local snapshot first so localhost edits (e.g. Crew DB release date)
       // are not overwritten by older remote payload on refresh.
@@ -2750,6 +2768,7 @@ export default function Page() {
             }
           }
           loaded = true
+          loadedFromLocalFirst = true
         } catch {
           // Ignore malformed local payload and continue remote/local fallback below.
         }
@@ -2764,7 +2783,9 @@ export default function Page() {
 
         if (!error && data && typeof data.payload === "object" && data.payload !== null) {
           const parsed = data.payload as DataStore
-          if (mounted) {
+          // If local snapshot already loaded in this session, keep it as source
+          // of truth and avoid overwriting with potentially older remote payload.
+          if (mounted && !loadedFromLocalFirst) {
             setStore({
               ...getEmptyStore(),
               ...parsed,
@@ -2785,6 +2806,8 @@ export default function Page() {
               }
             }
             setSyncStatus("synced")
+          } else if (mounted && loadedFromLocalFirst) {
+            setSyncStatus("loading")
           }
           loaded = true
         } else if (error) {
@@ -2855,7 +2878,10 @@ export default function Page() {
       // non-blocking
     }
 
-    if (!supabase || disableRemoteSyncRef.current) return
+    if (!supabase || disableRemoteSyncRef.current || !isOnlineRef.current) {
+      if (!supabase || !isOnlineRef.current) setSyncStatus("local-only")
+      return
+    }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
 
     const delayMs = forceRemoteSyncRef.current ? 0 : 500
@@ -2872,6 +2898,10 @@ export default function Page() {
       )
 
       if (error) {
+        if (typeof window !== "undefined" && !window.navigator.onLine) {
+          setSyncStatus("local-only")
+          return
+        }
         setSyncStatus("error")
         return
       }
@@ -2885,6 +2915,28 @@ export default function Page() {
     const savedAuthStaffId = window.localStorage.getItem(AUTH_STORAGE_KEY)
     setAuthStaffId(savedAuthStaffId || null)
     setIsAuthReady(true)
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const handleOnline = () => {
+      isOnlineRef.current = true
+      setIsOnline(true)
+      forceRemoteSyncRef.current = true
+      setSyncStatus("loading")
+      setStore((prev) => ({ ...prev }))
+    }
+    const handleOffline = () => {
+      isOnlineRef.current = false
+      setIsOnline(false)
+      setSyncStatus("local-only")
+    }
+    window.addEventListener("online", handleOnline)
+    window.addEventListener("offline", handleOffline)
+    return () => {
+      window.removeEventListener("online", handleOnline)
+      window.removeEventListener("offline", handleOffline)
+    }
   }, [])
 
   // First-run bootstrap: seed a default admin user when none exist so the
@@ -9378,6 +9430,17 @@ export default function Page() {
                   </div>
                 ) : activeConfig.key === "opsControl" ? (
                   <OpsControlTimeline
+                    flights={store.opsControl as unknown as FlightEntry[]}
+                    setFlights={(next) =>
+                      setStore((prev) => ({
+                        ...prev,
+                        opsControl: next as unknown as Entry[],
+                      }))
+                    }
+                  />
+                ) : activeConfig.key === "mxTypeManager" ? (
+                  <OpsControlTimeline
+                    view="mxTypeManager"
                     flights={store.opsControl as unknown as FlightEntry[]}
                     setFlights={(next) =>
                       setStore((prev) => ({
