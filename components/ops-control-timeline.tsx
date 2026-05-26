@@ -879,6 +879,7 @@ export default function OpsControlTimeline(props: {
   const dragOffsetXRef = useRef(0)
   const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const lastCenteredKeyRef = useRef<string>("")
+  const hasUserPickedScheduleDateRef = useRef(false)
 
   // Live "now" indicator — refresh every 30s while the view is mounted.
   const [nowMin, setNowMin] = useState<number>(() => {
@@ -924,20 +925,13 @@ export default function OpsControlTimeline(props: {
 
   const mxReasons = useMemo(() => {
     const map = new Map<string, number>()
-    DEFAULT_MX_REASONS.forEach((r) => map.set(r.reason, r.defaultDurationMin))
     mxConfigRows.forEach((row) => {
       const reason = (row.reason || "").trim()
       const n = Number((row.defaultDurationMin || "").trim())
       if (reason && Number.isFinite(n) && n > 0) map.set(reason, n)
     })
-    mxReasonRows.forEach((row) => {
-      const reason = (row.reason || row.remarks || "").trim()
-      if (!reason) return
-      const n = Number((row.defaultDurationMin || row.pax || "").toString().trim())
-      if (Number.isFinite(n) && n > 0) map.set(reason, n)
-    })
     return Array.from(map.entries()).map(([reason, duration]) => ({ reason, duration }))
-  }, [mxReasonRows, mxConfigRows])
+  }, [mxConfigRows])
   const mxTypeOptions = useMemo(() => {
     const set = new Set<string>(["Line", "Base"])
     mxConfigRows.forEach((r) => {
@@ -962,10 +956,11 @@ export default function OpsControlTimeline(props: {
     const firstAircraft = aircraftList[0] || ""
     const firstReason = mxReasons[0]?.reason || ""
     const firstDuration = mxReasons[0]?.duration ?? 120
+    const firstConfig = mxConfigRows[0]
     setMxForm({
       aircraft: firstAircraft,
-      mxType: "Line",
-      mxSchedule: "Schedule",
+      mxType: (firstConfig?.mxType || "Line").trim() || "Line",
+      mxSchedule: (firstConfig?.remarks || "Schedule").trim() || "Schedule",
       reason: firstReason,
       defaultDurationMin: String(firstDuration),
       startTime: "00:00",
@@ -1136,11 +1131,13 @@ export default function OpsControlTimeline(props: {
 
   const openEditMxModal = (mx: FlightEntry) => {
     const duration = Number(mx.defaultDurationMin || mx.pax || "120")
+    const rawReason = (mx.reason || "").trim()
+    const reasonExists = mxReasons.some((r) => r.reason === rawReason)
     setMxForm({
       aircraft: (mx.aircraft || "").trim(),
       mxType: (mx.mxType || "Line").trim() || "Line",
       mxSchedule: (mx.remarks || "Schedule").trim() || "Schedule",
-      reason: (mx.reason || "").trim(),
+      reason: reasonExists ? rawReason : "",
       defaultDurationMin: Number.isFinite(duration) ? String(duration) : "120",
       startTime: (mx.depTime || "").trim() || "00:00",
       endTime: (mx.arrTime || "").trim() || "02:00",
@@ -1157,6 +1154,10 @@ export default function OpsControlTimeline(props: {
   const saveMxEntry = () => {
     if (!mxForm.aircraft.trim() || !mxForm.reason.trim() || !mxForm.startTime || !mxForm.endTime) {
       setErrorMsg("MX requires Aircraft, Reason, Start Time and End Time.")
+      return
+    }
+    if (!mxReasons.some((r) => r.reason === mxForm.reason.trim())) {
+      setErrorMsg("Please choose a Reason from MX Type Manager list.")
       return
     }
     const now = new Date().toISOString()
@@ -1184,34 +1185,10 @@ export default function OpsControlTimeline(props: {
       reason: mxForm.reason.trim(),
       defaultDurationMin: Number.isFinite(duration) ? String(duration) : "",
     } as FlightEntry
-    const reasonExists = mxReasonRows.some(
-      (r) => ((r.reason || r.remarks || "").trim().toLowerCase() === mxForm.reason.trim().toLowerCase()),
-    )
-    const reasonRow: FlightEntry | null = reasonExists
-      ? null
-      : ({
-          id: `mxr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-          createdAt: now,
-          recordType: "mxReason",
-          scheduleDate,
-          aircraft: "",
-          flightNo: "",
-          origin: "",
-          destination: "",
-          depTime: "",
-          arrTime: "",
-          pic: "",
-          sic: "",
-          ca: "",
-          pax: Number.isFinite(duration) ? String(duration) : "",
-          remarks: mxForm.reason.trim(),
-          reason: mxForm.reason.trim(),
-          defaultDurationMin: Number.isFinite(duration) ? String(duration) : "",
-        } as FlightEntry)
     if (editingMxId) {
       setFlights(allFlights.map((row) => (row.id === editingMxId ? mxEntry : row)))
     } else {
-      setFlights(reasonRow ? [mxEntry, reasonRow, ...allFlights] : [mxEntry, ...allFlights])
+      setFlights([mxEntry, ...allFlights])
     }
     setErrorMsg(null)
     setEditingMxId(null)
@@ -1585,13 +1562,6 @@ export default function OpsControlTimeline(props: {
   const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
-      const today = new Date()
-      const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
-      if (scheduleDate > todayKey && releaseVersion !== "Initial") {
-        setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
-        e.currentTarget.value = ""
-        return
-      }
       setErrorMsg(null)
       void handleFile(file)
     }
@@ -1602,12 +1572,6 @@ export default function OpsControlTimeline(props: {
     e.preventDefault()
     const file = e.dataTransfer?.files?.[0]
     if (file) {
-      const today = new Date()
-      const todayKey = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-${pad2(today.getDate())}`
-      if (scheduleDate > todayKey && releaseVersion !== "Initial") {
-        setErrorMsg("This is a future schedule date. Please mark it as Initial Schedule before importing.")
-        return
-      }
       setErrorMsg(null)
       void handleFile(file)
     }
@@ -1844,6 +1808,7 @@ export default function OpsControlTimeline(props: {
   )
 
   useEffect(() => {
+    if (hasUserPickedScheduleDateRef.current) return
     const hasCurrentData =
       currentDateVersionRows.length > 0 ||
       flights.length > 0 ||
@@ -2144,7 +2109,10 @@ export default function OpsControlTimeline(props: {
                   className="form-control form-control-sm"
                   style={{ width: 160 }}
                   value={scheduleDate}
-                  onChange={(e) => setScheduleDate(e.target.value)}
+                  onChange={(e) => {
+                    hasUserPickedScheduleDateRef.current = true
+                    setScheduleDate(e.target.value)
+                  }}
                 />
               </div>
               <button
@@ -2504,7 +2472,10 @@ export default function OpsControlTimeline(props: {
                     className="form-control form-control-sm"
                     style={{ width: 170 }}
                     value={scheduleDate}
-                    onChange={(e) => setScheduleDate(e.target.value)}
+                    onChange={(e) => {
+                      hasUserPickedScheduleDateRef.current = true
+                      setScheduleDate(e.target.value)
+                    }}
                   />
                 </div>
                 <div className="row g-2 mb-3">

@@ -952,7 +952,7 @@ type NavGroup = {
 const NAV_GROUPS: NavGroup[] = [
   {
     title: "Crew Operation",
-    icon: Users,
+    icon: Plane,
     items: [
       { key: "crewRostering", label: "Crew Rostering", icon: CalendarDays },
       { key: "crewLeavePlanner", label: "Crew Leave Planner", icon: ClipboardList },
@@ -1498,10 +1498,7 @@ export default function Page() {
     fromDate: "",
     toDate: "",
   })
-  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState({
-    fromDate: `${new Date().getFullYear()}-01-01`,
-    toDate: `${new Date().getFullYear()}-12-31`,
-  })
+  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState(() => getCurrentMonthRange())
   const [crewLeaveTimelineCrewTypeFilter, setCrewLeaveTimelineCrewTypeFilter] = useState("Captain")
   const [showTimelineWpLpSummary, setShowTimelineWpLpSummary] = useState(true)
   const [isCrewRosterGeneratorOpen, setIsCrewRosterGeneratorOpen] = useState(false)
@@ -1916,12 +1913,8 @@ export default function Page() {
     isCrewTimelineActive,
   ])
   useEffect(() => {
-    const year = new Date().getFullYear()
     if (!isCrewTimelineActive) return
-    setCrewLeaveTimelineFilter({
-      fromDate: `${year}-01-01`,
-      toDate: `${year}-12-31`,
-    })
+    setCrewLeaveTimelineFilter(getCurrentMonthRange())
   }, [isCrewTimelineActive])
   useEffect(() => {
     if (!isCrewTimelineActive) return
@@ -10447,9 +10440,61 @@ export default function Page() {
                     ) : null}
 
                     {crewLeavePlannerTab === "timeline" ? (
-                      <div className="card border">
-                        <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
-                          <span>Master Roster</span>
+                      <div>
+                        <div className="d-flex flex-wrap align-items-end justify-content-between gap-2 mb-2">
+                          <div className="d-flex flex-wrap align-items-end gap-2">
+                            <div style={{ width: 170 }}>
+                              <label className="form-label small fw-semibold mb-1">From Date</label>
+                              <input
+                                type="date"
+                                className="form-control form-control-sm"
+                                value={crewLeaveTimelineFilter.fromDate}
+                                onChange={(e) =>
+                                  setCrewLeaveTimelineFilter((p) => ({ ...p, fromDate: e.target.value }))
+                                }
+                              />
+                            </div>
+                            <div style={{ width: 170 }}>
+                              <label className="form-label small fw-semibold mb-1">To Date</label>
+                              <input
+                                type="date"
+                                className="form-control form-control-sm"
+                                value={crewLeaveTimelineFilter.toDate}
+                                onChange={(e) =>
+                                  setCrewLeaveTimelineFilter((p) => ({ ...p, toDate: e.target.value }))
+                                }
+                              />
+                            </div>
+                            <div style={{ width: 190 }}>
+                              <label className="form-label small fw-semibold mb-1">Crew Type</label>
+                              <select
+                                className="form-select form-select-sm"
+                                value={crewLeaveTimelineCrewTypeFilter}
+                                onChange={(e) => setCrewLeaveTimelineCrewTypeFilter(e.target.value)}
+                              >
+                                <option value="">All Crew Types</option>
+                                {crewTimelineCrewTypes.map((t) => (
+                                  <option key={t} value={t}>
+                                    {t}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline-dark"
+                              onClick={() => setIsCrewRosterGeneratorOpen(true)}
+                            >
+                              Roster Generator
+                            </button>
+                            <button
+                              type="button"
+                              className={"btn btn-sm " + (showTimelineWpLpSummary ? "btn-primary" : "btn-outline-secondary")}
+                              onClick={() => setShowTimelineWpLpSummary((v) => !v)}
+                            >
+                              WP/LP Summary {showTimelineWpLpSummary ? "On" : "Off"}
+                            </button>
+                          </div>
                           <div className="d-flex align-items-center gap-2">
                             <label className="small fw-semibold mb-0">
                               Timeline Zoom ({crewLeaveTimelineDayWidth}px/day)
@@ -10479,64 +10524,6 @@ export default function Page() {
                             </button>
                           </div>
                         </div>
-                        <div className="card-body">
-                          <div className="row g-2 mb-3">
-                            <div className="col-6 col-md-2">
-                              <label className="form-label small fw-semibold">From Date</label>
-                              <input
-                                type="date"
-                                className="form-control"
-                                value={crewLeaveTimelineFilter.fromDate}
-                                onChange={(e) =>
-                                  setCrewLeaveTimelineFilter((p) => ({ ...p, fromDate: e.target.value }))
-                                }
-                              />
-                            </div>
-                            <div className="col-6 col-md-2">
-                              <label className="form-label small fw-semibold">To Date</label>
-                              <input
-                                type="date"
-                                className="form-control"
-                                value={crewLeaveTimelineFilter.toDate}
-                                onChange={(e) =>
-                                  setCrewLeaveTimelineFilter((p) => ({ ...p, toDate: e.target.value }))
-                                }
-                              />
-                            </div>
-                            <div className="col-6 col-md-2">
-                              <label className="form-label small fw-semibold">Crew Type</label>
-                              <select
-                                className="form-select"
-                                value={crewLeaveTimelineCrewTypeFilter}
-                                onChange={(e) => setCrewLeaveTimelineCrewTypeFilter(e.target.value)}
-                              >
-                                <option value="">All Crew Types</option>
-                                {crewTimelineCrewTypes.map((t) => (
-                                  <option key={t} value={t}>
-                                    {t}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="col-12 col-md-2 d-flex align-items-end">
-                              <button
-                                type="button"
-                                className="btn btn-sm btn-outline-dark w-100"
-                                onClick={() => setIsCrewRosterGeneratorOpen(true)}
-                              >
-                                Roster Generator
-                              </button>
-                            </div>
-                            <div className="col-12 col-md-2 d-flex align-items-end">
-                              <button
-                                type="button"
-                                className={"btn btn-sm w-100 " + (showTimelineWpLpSummary ? "btn-primary" : "btn-outline-secondary")}
-                                onClick={() => setShowTimelineWpLpSummary((v) => !v)}
-                              >
-                                WP/LP Summary {showTimelineWpLpSummary ? "On" : "Off"}
-                              </button>
-                            </div>
-                          </div>
                           {!crewLeaveTimelineView.crewRows.length || !crewLeaveTimelineView.dates.length ? (
                             <div className="small text-muted">
                               No generated blocks for selected date range. Generate rotation first, then open timeline.
@@ -10546,7 +10533,7 @@ export default function Page() {
                               ref={crewLeaveTimelineScrollRef}
                               style={{
                                 overflow: "auto",
-                                maxHeight: 560,
+                                maxHeight: "72vh",
                                 border: "1px solid #e5e7eb",
                                 borderRadius: 8,
                               }}
@@ -11167,7 +11154,6 @@ export default function Page() {
                               </div>
                             </div>
                           )}
-                        </div>
                       </div>
                     ) : null}
 
