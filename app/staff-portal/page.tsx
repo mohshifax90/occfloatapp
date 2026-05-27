@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   AlertTriangle,
@@ -10,6 +10,7 @@ import {
   Briefcase,
   CalendarCheck,
   CalendarDays,
+  Camera,
   ChevronLeft,
   ChevronRight,
   Clipboard,
@@ -27,6 +28,7 @@ import {
   Phone,
   Plane,
   Plus,
+  Save,
   Radio,
   Send,
   Shield,
@@ -36,6 +38,7 @@ import {
   UserPlus,
   Users,
   X,
+  PenSquare,
 } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { createClient as createSupabaseClient } from "@/utils/supabase/client"
@@ -610,6 +613,11 @@ export default function StaffPortalPage() {
   // Persist staff-submitted requests so the main app can pick them up.
   useEffect(() => {
     if (!hydrated) return
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+  }, [store, hydrated])
+
+  useEffect(() => {
+    if (!hydrated) return
     window.localStorage.setItem(
       STAFF_PORTAL_REQUESTS_KEY,
       JSON.stringify(staffRequests),
@@ -680,6 +688,23 @@ export default function StaffPortalPage() {
     }, 400)
     return () => window.clearTimeout(timer)
   }, [staffRequests, hydrated, supabase])
+
+  // Push updated store (profile edits/photo/signature) to Supabase.
+  useEffect(() => {
+    if (!hydrated || !supabase) return
+    const timer = window.setTimeout(async () => {
+      try {
+        await supabase.from(SUPABASE_STORE_TABLE).upsert({
+          id: SUPABASE_STORE_ID,
+          payload: store,
+          updated_at: new Date().toISOString(),
+        })
+      } catch {
+        // Keep portal usable offline / when remote sync fails.
+      }
+    }, 500)
+    return () => window.clearTimeout(timer)
+  }, [store, hydrated, supabase])
 
   const me = useMemo<Entry | null>(() => {
     if (!authStaffId) return null
@@ -1237,6 +1262,29 @@ export default function StaffPortalPage() {
     }
   }
 
+  const saveMyProfile = (patch: {
+    phoneNumber?: string
+    addressPresent?: string
+    profilePhoto?: string
+    signatureData?: string
+  }) => {
+    if (!me) return
+    setStore((prev) => ({
+      ...prev,
+      staff: prev.staff.map((row) =>
+        row.id !== me.id
+          ? row
+          : {
+              ...row,
+              ...(patch.phoneNumber !== undefined ? { phoneNumber: patch.phoneNumber } : {}),
+              ...(patch.addressPresent !== undefined ? { addressPresent: patch.addressPresent } : {}),
+              ...(patch.profilePhoto !== undefined ? { avatar: patch.profilePhoto } : {}),
+              ...(patch.signatureData !== undefined ? { signatureData: patch.signatureData } : {}),
+            },
+      ),
+    }))
+  }
+
   // ------------------------------------------------------------------
   // Render guards.
   // ------------------------------------------------------------------
@@ -1437,6 +1485,7 @@ export default function StaffPortalPage() {
               setIsLeaveRequestModalOpen(true)
             }}
             onLogout={logout}
+            onSaveProfile={saveMyProfile}
           />
         ) : null}
       </section>
@@ -3217,6 +3266,12 @@ function ProfileView(props: {
   profilePairing: PairingRow[]
   onOpenLeaveRequest: () => void
   onLogout: () => void
+  onSaveProfile: (patch: {
+    phoneNumber?: string
+    addressPresent?: string
+    profilePhoto?: string
+    signatureData?: string
+  }) => void
 }) {
   const {
     me,
@@ -3228,7 +3283,20 @@ function ProfileView(props: {
     evaluations,
     onOpenLeaveRequest,
     onLogout,
+    onSaveProfile,
   } = props
+  const [editMode, setEditMode] = useState(false)
+  const [phoneNumberDraft, setPhoneNumberDraft] = useState((me.phoneNumber || "").trim())
+  const [addressPresentDraft, setAddressPresentDraft] = useState((me.addressPresent || "").trim())
+  const [photoDraft, setPhotoDraft] = useState((me.avatar || "").trim())
+  const [signatureDraft, setSignatureDraft] = useState((me.signatureData || "").trim())
+  const [showSignatureModal, setShowSignatureModal] = useState(false)
+  useEffect(() => {
+    setPhoneNumberDraft((me.phoneNumber || "").trim())
+    setAddressPresentDraft((me.addressPresent || "").trim())
+    setPhotoDraft((me.avatar || "").trim())
+    setSignatureDraft((me.signatureData || "").trim())
+  }, [me])
   const todayCode = codeForMyDay(todayYmd)
   const todayShift = shiftByCode.get((todayCode || "").trim().toUpperCase()) || null
   const todayTint = softTintForCode(todayCode, shiftByCode)
@@ -3275,9 +3343,14 @@ function ProfileView(props: {
               background: "#dbeafe",
               color: "#1d4ed8",
               flex: "0 0 auto",
+              overflow: "hidden",
             }}
           >
-            <StaffAvatarIcon staffNo={me.staffNo || ""} size={24} />
+            {photoDraft ? (
+              <img src={photoDraft} alt="Profile" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              <StaffAvatarIcon staffNo={me.staffNo || ""} size={24} />
+            )}
           </div>
           <div className="min-w-0 flex-grow-1">
             <div className="fw-semibold text-truncate">{me.fullName || "-"}</div>
@@ -3301,6 +3374,29 @@ function ProfileView(props: {
           </span>
         </div>
         <div className="card-footer bg-transparent border-0 pt-0 d-flex align-items-center justify-content-end gap-2">
+          <button
+            type="button"
+            className={"btn btn-sm " + (editMode ? "btn-primary" : "btn-outline-primary")}
+            onClick={() => {
+              if (editMode) {
+                onSaveProfile({
+                  phoneNumber: phoneNumberDraft.trim(),
+                  addressPresent: addressPresentDraft.trim(),
+                  profilePhoto: photoDraft,
+                  signatureData: signatureDraft,
+                })
+              }
+              setEditMode((v) => !v)
+            }}
+          >
+            {editMode ? (
+              <>
+                <Save size={14} /> Save Profile
+              </>
+            ) : (
+              "Edit Profile"
+            )}
+          </button>
           <ThemeToggle />
           <button className="btn btn-sm btn-outline-secondary d-inline-flex align-items-center gap-1" onClick={onLogout}>
             <LogOut size={14} />
@@ -3325,7 +3421,87 @@ function ProfileView(props: {
             <div className="col-6 text-muted">Level</div>
             <div className="col-6 fw-semibold text-end">{me.level || "-"}</div>
             <div className="col-6 text-muted">Phone Number</div>
-            <div className="col-6 fw-semibold text-end">{me.phoneNumber || "-"}</div>
+            <div className="col-6 text-end">
+              {editMode ? (
+                <input
+                  type="text"
+                  className="form-control form-control-sm text-end"
+                  value={phoneNumberDraft}
+                  onChange={(e) => setPhoneNumberDraft(e.target.value)}
+                  placeholder="Phone Number"
+                />
+              ) : (
+                <span className="fw-semibold">{me.phoneNumber || "-"}</span>
+              )}
+            </div>
+            <div className="col-6 text-muted">Present Address</div>
+            <div className="col-6 text-end">
+              {editMode ? (
+                <textarea
+                  className="form-control form-control-sm"
+                  rows={2}
+                  value={addressPresentDraft}
+                  onChange={(e) => setAddressPresentDraft(e.target.value)}
+                  placeholder="Present Address"
+                />
+              ) : (
+                <span className="fw-semibold">{me.addressPresent || "-"}</span>
+              )}
+            </div>
+            <div className="col-6 text-muted">Permanent Address</div>
+            <div className="col-6 fw-semibold text-end">{me.addressPermanent || "-"}</div>
+            <div className="col-6 text-muted">Photo</div>
+            <div className="col-6 text-end">
+              {editMode ? (
+                <label className="btn btn-sm btn-outline-secondary mb-0">
+                  <Camera size={14} className="me-1" />
+                  Upload / Take
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="user"
+                    className="d-none"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (!file) return
+                      const reader = new FileReader()
+                      reader.onload = () => setPhotoDraft(typeof reader.result === "string" ? reader.result : "")
+                      reader.readAsDataURL(file)
+                      e.currentTarget.value = ""
+                    }}
+                  />
+                </label>
+              ) : photoDraft ? (
+                <img src={photoDraft} alt="Profile" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover" }} />
+              ) : (
+                <span className="fw-semibold">-</span>
+              )}
+            </div>
+            <div className="col-6 text-muted">Signature</div>
+            <div className="col-6 text-end">
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-dark"
+                disabled={!editMode}
+                onClick={() => setShowSignatureModal(true)}
+              >
+                <PenSquare size={14} className="me-1" />
+                Set Signature
+              </button>
+              {!editMode ? <div className="small text-muted mt-1">Enable Edit Profile to change</div> : null}
+            </div>
+            {signatureDraft ? (
+              <>
+                <div className="col-6 text-muted">Saved Signature</div>
+                <div className="col-6 text-end">
+                  <img
+                    src={signatureDraft}
+                    alt="Signature"
+                    style={{ maxWidth: 180, maxHeight: 54, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 4 }}
+                  />
+                </div>
+              </>
+            ) : null}
           </div>
           <div className="row g-2">
             <div className="col-6 col-lg-3">
@@ -3362,6 +3538,129 @@ function ProfileView(props: {
                 <div className="text-muted small">Leave Request</div>
                 <div className="fw-semibold mt-1">Create</div>
                 <div className="small text-muted mt-2">Open request form</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      {showSignatureModal ? (
+        <SignatureDrawModal
+          initialData={signatureDraft}
+          onClose={() => setShowSignatureModal(false)}
+          onSave={(dataUrl) => {
+            setSignatureDraft(dataUrl)
+            setShowSignatureModal(false)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function SignatureDrawModal(props: {
+  initialData: string
+  onClose: () => void
+  onSave: (dataUrl: string) => void
+}) {
+  const { initialData, onClose, onSave } = props
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const drawingRef = useRef(false)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+    ctx.fillStyle = "#ffffff"
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    if (initialData) {
+      const img = new Image()
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      }
+      img.src = initialData
+    }
+  }, [initialData])
+
+  const getPoint = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  }
+
+  return (
+    <div
+      className="modal show d-block"
+      tabIndex={-1}
+      style={{ background: "rgba(0,0,0,0.5)" }}
+      onClick={onClose}
+    >
+      <div className="modal-dialog modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-content border-0 shadow" style={{ borderRadius: 14 }}>
+          <div className="modal-header border-0 pb-0">
+            <h5 className="modal-title">Draw Signature</h5>
+            <button className="btn btn-sm btn-light" onClick={onClose}>Close</button>
+          </div>
+          <div className="modal-body">
+            <canvas
+              ref={canvasRef}
+              width={520}
+              height={180}
+              style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff" }}
+              onMouseDown={(e) => {
+                const canvas = canvasRef.current
+                if (!canvas) return
+                const ctx = canvas.getContext("2d")
+                if (!ctx) return
+                const p = getPoint(e)
+                drawingRef.current = true
+                ctx.beginPath()
+                ctx.moveTo(p.x, p.y)
+                ctx.lineWidth = 2
+                ctx.lineCap = "round"
+                ctx.strokeStyle = "#111827"
+              }}
+              onMouseMove={(e) => {
+                if (!drawingRef.current) return
+                const canvas = canvasRef.current
+                if (!canvas) return
+                const ctx = canvas.getContext("2d")
+                if (!ctx) return
+                const p = getPoint(e)
+                ctx.lineTo(p.x, p.y)
+                ctx.stroke()
+              }}
+              onMouseUp={() => {
+                drawingRef.current = false
+              }}
+              onMouseLeave={() => {
+                drawingRef.current = false
+              }}
+            />
+            <div className="d-flex justify-content-between mt-2">
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary"
+                onClick={() => {
+                  const canvas = canvasRef.current
+                  if (!canvas) return
+                  const ctx = canvas.getContext("2d")
+                  if (!ctx) return
+                  ctx.fillStyle = "#ffffff"
+                  ctx.fillRect(0, 0, canvas.width, canvas.height)
+                }}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => {
+                  const canvas = canvasRef.current
+                  if (!canvas) return
+                  onSave(canvas.toDataURL("image/png"))
+                }}
+              >
+                Save Signature
               </button>
             </div>
           </div>
