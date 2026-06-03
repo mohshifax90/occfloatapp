@@ -2851,6 +2851,14 @@ export default function Page() {
 
       if (mounted) {
         hasLoadedRef.current = true
+        if (
+          forceRemoteSyncRef.current &&
+          supabase &&
+          !disableRemoteSyncRef.current &&
+          isOnlineRef.current
+        ) {
+          setStore((prev) => ({ ...prev }))
+        }
       }
     }
 
@@ -2903,15 +2911,22 @@ export default function Page() {
     const delayMs = forceRemoteSyncRef.current ? 0 : 500
     saveTimerRef.current = setTimeout(async () => {
       setSyncStatus("saving")
-      const { error } = await supabase.from(SUPABASE_STORE_TABLE).upsert(
-        {
-          id: SUPABASE_STORE_ID,
-          payload: store,
-        },
-        {
-          onConflict: "id",
-        },
-      )
+      let error: unknown = null
+      try {
+        const result = await supabase.from(SUPABASE_STORE_TABLE).upsert(
+          {
+            id: SUPABASE_STORE_ID,
+            payload: store,
+          },
+          {
+            onConflict: "id",
+          },
+        )
+        error = result.error
+      } catch (err) {
+        error = err
+      }
+      saveTimerRef.current = null
 
       if (error) {
         if (typeof window !== "undefined" && !window.navigator.onLine) {
