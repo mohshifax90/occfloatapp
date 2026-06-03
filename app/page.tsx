@@ -2741,6 +2741,7 @@ export default function Page() {
       if (mounted) setHydrated(true)
       let loaded = false
       let loadedFromLocalFirst = false
+      let localFirstSnapshot: DataStore | null = null
 
       // Prefer local snapshot first so localhost edits (e.g. Crew DB release date)
       // are not overwritten by older remote payload on refresh.
@@ -2748,11 +2749,12 @@ export default function Page() {
       if (rawLocalFirst) {
         try {
           const parsed = JSON.parse(rawLocalFirst) as DataStore
+          localFirstSnapshot = {
+            ...getEmptyStore(),
+            ...parsed,
+          }
           if (mounted) {
-            setStore({
-              ...getEmptyStore(),
-              ...parsed,
-            })
+            setStore(localFirstSnapshot)
             if (supabase && !disableRemoteSyncRef.current) {
               forceRemoteSyncRef.current = true
               setSyncStatus("loading")
@@ -2776,13 +2778,20 @@ export default function Page() {
 
         if (!error && data && typeof data.payload === "object" && data.payload !== null) {
           const parsed = data.payload as DataStore
+          const parsedRemote = {
+            ...getEmptyStore(),
+            ...parsed,
+          }
+          const scoreStore = (value: DataStore) =>
+            (value.staff?.length || 0) +
+            (value.roster?.length || 0) +
+            (value.opsControl?.length || 0) +
+            (value.crewDataBase?.length || 0) +
+            (value.crewLeavePlanner?.length || 0)
           // If local snapshot already loaded in this session, keep it as source
           // of truth and avoid overwriting with potentially older remote payload.
           if (mounted && !loadedFromLocalFirst) {
-            setStore({
-              ...getEmptyStore(),
-              ...parsed,
-            })
+            setStore(parsedRemote)
             try {
               window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
             } catch {
@@ -2800,7 +2809,21 @@ export default function Page() {
             }
             setSyncStatus("synced")
           } else if (mounted && loadedFromLocalFirst) {
-            setSyncStatus("loading")
+            // If local cache looks partial/truncated but remote has richer data,
+            // prefer remote and refresh local cache.
+            const localScore = localFirstSnapshot ? scoreStore(localFirstSnapshot) : 0
+            const remoteScore = scoreStore(parsedRemote)
+            if (remoteScore > localScore) {
+              setStore(parsedRemote)
+              try {
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRemote))
+              } catch {
+                // non-blocking
+              }
+              setSyncStatus("synced")
+            } else {
+              setSyncStatus("loading")
+            }
           }
           loaded = true
         } else if (error) {

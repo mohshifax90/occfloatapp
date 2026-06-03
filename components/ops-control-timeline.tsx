@@ -60,6 +60,7 @@ export type FlightEntry = {
   mxType?: string
   reason?: string
   defaultDurationMin?: string
+  mergeAsFlight?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -739,10 +740,6 @@ export default function OpsControlTimeline(props: {
   const [showUploadedTable, setShowUploadedTable] = useState(false)
   const [showComparisonLog, setShowComparisonLog] = useState(false)
   const [scheduleDate, setScheduleDate] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      const saved = window.localStorage.getItem(OPS_CONTROL_DATE_KEY)
-      if (saved) return saved
-    }
     const d = new Date()
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
   })
@@ -760,14 +757,6 @@ export default function OpsControlTimeline(props: {
         .sort((a, b) => (a.depTime || "").localeCompare(b.depTime || "")),
     [allFlights, scheduleDate],
   )
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(OPS_CONTROL_DATE_KEY, scheduleDate)
-    } catch {
-      // non-blocking
-    }
-  }, [scheduleDate])
 
   // Tick interval slider — discrete steps in minutes. Default 15.
   const INTERVAL_OPTIONS = [5, 10, 15, 30, 60]
@@ -2211,6 +2200,7 @@ export default function OpsControlTimeline(props: {
                       <th>C/A</th>
                       <th>EMB</th>
                       <th>DEMB</th>
+                      <th>Merge as Flight</th>
                       <th>REMARKS</th>
                     </tr>
                   </thead>
@@ -2229,12 +2219,29 @@ export default function OpsControlTimeline(props: {
                           <td>{row.ca || "-"}</td>
                           <td>{row.emb || "-"}</td>
                           <td>{row.demb || "-"}</td>
+                          <td>
+                            <input
+                              type="checkbox"
+                              className="form-check-input"
+                              checked={((row.mergeAsFlight || "").trim().toLowerCase() === "yes")}
+                              onChange={(e) => {
+                                const checked = e.target.checked
+                                setFlights(
+                                  allFlights.map((x) =>
+                                    x.id !== row.id
+                                      ? x
+                                      : { ...x, mergeAsFlight: checked ? "Yes" : "No" },
+                                  ),
+                                )
+                              }}
+                            />
+                          </td>
                           <td>{row.remarks || "-"}</td>
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={12} className="text-muted">No uploaded rows for selected date.</td>
+                        <td colSpan={13} className="text-muted">No uploaded rows for selected date.</td>
                       </tr>
                     )}
                   </tbody>
@@ -3413,7 +3420,10 @@ export default function OpsControlTimeline(props: {
                                         const x1 = A.left + A.width
                                         const x2 = B.left
                                         if (x2 <= x1) continue
-                                        if (x2 - x1 > maxGapPx) continue
+                                        const forceMerge =
+                                          (A.f.mergeAsFlight || "").trim().toLowerCase() === "yes" ||
+                                          (B.f.mergeAsFlight || "").trim().toLowerCase() === "yes"
+                                        if (!forceMerge && x2 - x1 > maxGapPx) continue
                                         sameFlightConnectedIds.add(A.f.id)
                                         sameFlightConnectedIds.add(B.f.id)
                                         out.push(

@@ -233,6 +233,9 @@ function normalizeStoreFromPayload(payload: unknown): DataStore {
   const incoming = payload as Record<string, unknown>
   const base = getEmptyStore()
   const next: DataStore = { ...base }
+  Object.entries(incoming).forEach(([k, v]) => {
+    if (Array.isArray(v)) next[k] = v as Entry[]
+  })
   ;(Object.keys(base) as Array<keyof DataStore>).forEach((k) => {
     const v = incoming[k as string]
     next[k] = Array.isArray(v) ? (v as Entry[]) : []
@@ -613,11 +616,6 @@ export default function StaffPortalPage() {
   // Persist staff-submitted requests so the main app can pick them up.
   useEffect(() => {
     if (!hydrated) return
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
-  }, [store, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) return
     window.localStorage.setItem(
       STAFF_PORTAL_REQUESTS_KEY,
       JSON.stringify(staffRequests),
@@ -688,23 +686,6 @@ export default function StaffPortalPage() {
     }, 400)
     return () => window.clearTimeout(timer)
   }, [staffRequests, hydrated, supabase])
-
-  // Push updated store (profile edits/photo/signature) to Supabase.
-  useEffect(() => {
-    if (!hydrated || !supabase) return
-    const timer = window.setTimeout(async () => {
-      try {
-        await supabase.from(SUPABASE_STORE_TABLE).upsert({
-          id: SUPABASE_STORE_ID,
-          payload: store,
-          updated_at: new Date().toISOString(),
-        })
-      } catch {
-        // Keep portal usable offline / when remote sync fails.
-      }
-    }, 500)
-    return () => window.clearTimeout(timer)
-  }, [store, hydrated, supabase])
 
   const me = useMemo<Entry | null>(() => {
     if (!authStaffId) return null
@@ -1269,9 +1250,9 @@ export default function StaffPortalPage() {
     signatureData?: string
   }) => {
     if (!me) return
-    setStore((prev) => ({
-      ...prev,
-      staff: prev.staff.map((row) =>
+    let nextStaff: Entry[] = []
+    setStore((prev) => {
+      nextStaff = prev.staff.map((row) =>
         row.id !== me.id
           ? row
           : {
@@ -1281,8 +1262,43 @@ export default function StaffPortalPage() {
               ...(patch.profilePhoto !== undefined ? { avatar: patch.profilePhoto } : {}),
               ...(patch.signatureData !== undefined ? { signatureData: patch.signatureData } : {}),
             },
-      ),
-    }))
+      )
+      return {
+        ...prev,
+        staff: nextStaff,
+      }
+    })
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY)
+      const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      const merged = { ...parsed, staff: nextStaff }
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+    } catch {
+      // non-blocking
+    }
+    if (supabase) {
+      void (async () => {
+        try {
+          const { data } = await supabase
+            .from(SUPABASE_STORE_TABLE)
+            .select("payload")
+            .eq("id", SUPABASE_STORE_ID)
+            .maybeSingle()
+          const payload =
+            data?.payload && typeof data.payload === "object"
+              ? ({ ...(data.payload as Record<string, unknown>) } as Record<string, unknown>)
+              : {}
+          payload.staff = nextStaff
+          await supabase.from(SUPABASE_STORE_TABLE).upsert({
+            id: SUPABASE_STORE_ID,
+            payload,
+            updated_at: new Date().toISOString(),
+          })
+        } catch {
+          // non-blocking
+        }
+      })()
+    }
   }
 
   // ------------------------------------------------------------------
@@ -3565,6 +3581,7 @@ function SignatureDrawModal(props: {
   const { initialData, onClose, onSave } = props
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const drawingRef = useRef(false)
+  const activePointerIdRef = useRef<number | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -3582,9 +3599,11 @@ function SignatureDrawModal(props: {
     }
   }, [initialData])
 
-  const getPoint = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  const getCanvasPoint = (canvas: HTMLCanvasElement, clientX: number, clientY: number) => {
+    const rect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / rect.width
+    const scaleY = canvas.height / rect.height
+    return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY }
   }
 
   return (
@@ -3605,35 +3624,59 @@ function SignatureDrawModal(props: {
               ref={canvasRef}
               width={520}
               height={180}
-              style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff" }}
-              onMouseDown={(e) => {
+              style={{
+                width: "100%",
+                border: "1px solid #e5e7eb",
+                borderRadius: 8,
+                background: "#fff",
+                touchAction: "none",
+              }}
+              onPointerDown={(e) => {
                 const canvas = canvasRef.current
                 if (!canvas) return
                 const ctx = canvas.getContext("2d")
                 if (!ctx) return
-                const p = getPoint(e)
+                const p = getCanvasPoint(canvas, e.clientX, e.clientY)
                 drawingRef.current = true
+                activePointerIdRef.current = e.pointerId
+                canvas.setPointerCapture(e.pointerId)
                 ctx.beginPath()
                 ctx.moveTo(p.x, p.y)
                 ctx.lineWidth = 2
                 ctx.lineCap = "round"
                 ctx.strokeStyle = "#111827"
               }}
-              onMouseMove={(e) => {
+              onPointerMove={(e) => {
                 if (!drawingRef.current) return
+                if (activePointerIdRef.current !== e.pointerId) return
                 const canvas = canvasRef.current
                 if (!canvas) return
                 const ctx = canvas.getContext("2d")
                 if (!ctx) return
-                const p = getPoint(e)
+                const p = getCanvasPoint(canvas, e.clientX, e.clientY)
                 ctx.lineTo(p.x, p.y)
                 ctx.stroke()
               }}
-              onMouseUp={() => {
+              onPointerUp={(e) => {
                 drawingRef.current = false
+                activePointerIdRef.current = null
+                const canvas = canvasRef.current
+                if (canvas && canvas.hasPointerCapture(e.pointerId)) {
+                  canvas.releasePointerCapture(e.pointerId)
+                }
               }}
-              onMouseLeave={() => {
+              onPointerCancel={(e) => {
                 drawingRef.current = false
+                activePointerIdRef.current = null
+                const canvas = canvasRef.current
+                if (canvas && canvas.hasPointerCapture(e.pointerId)) {
+                  canvas.releasePointerCapture(e.pointerId)
+                }
+              }}
+              onPointerLeave={(e) => {
+                if (activePointerIdRef.current !== e.pointerId) return
+                drawingRef.current = false
+                activePointerIdRef.current = null
               }}
             />
             <div className="d-flex justify-content-between mt-2">
