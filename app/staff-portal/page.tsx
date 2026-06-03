@@ -1250,6 +1250,7 @@ export default function StaffPortalPage() {
     signatureData?: string
   }) => {
     if (!me) return
+    const profileUpdatedAt = new Date().toISOString()
     let nextStaff: Entry[] = []
     setStore((prev) => {
       nextStaff = prev.staff.map((row) =>
@@ -1261,6 +1262,7 @@ export default function StaffPortalPage() {
               ...(patch.addressPresent !== undefined ? { addressPresent: patch.addressPresent } : {}),
               ...(patch.profilePhoto !== undefined ? { avatar: patch.profilePhoto } : {}),
               ...(patch.signatureData !== undefined ? { signatureData: patch.signatureData } : {}),
+              profileUpdatedAt,
             },
       )
       return {

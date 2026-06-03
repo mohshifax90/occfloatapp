@@ -2788,6 +2788,41 @@ export default function Page() {
             (value.opsControl?.length || 0) +
             (value.crewDataBase?.length || 0) +
             (value.crewLeavePlanner?.length || 0)
+          const mergeStaffProfileUpdates = (local: DataStore, remote: DataStore): DataStore => {
+            const remoteById = new Map((remote.staff || []).map((row) => [row.id, row]))
+            let changed = false
+            const staff = (local.staff || []).map((localRow) => {
+              const remoteRow = remoteById.get(localRow.id)
+              if (!remoteRow) return localRow
+              const localProfileAt = Date.parse(localRow.profileUpdatedAt || "")
+              const remoteProfileAt = Date.parse(remoteRow.profileUpdatedAt || "")
+              const remoteIsNewer =
+                Number.isFinite(remoteProfileAt) &&
+                (!Number.isFinite(localProfileAt) || remoteProfileAt > localProfileAt)
+              const hasRemoteProfileFields = Boolean(
+                remoteRow.phoneNumber ||
+                  remoteRow.addressPresent ||
+                  remoteRow.avatar ||
+                  remoteRow.signatureData,
+              )
+              const localMissingProfileFields =
+                !localRow.phoneNumber ||
+                !localRow.addressPresent ||
+                !localRow.avatar ||
+                !localRow.signatureData
+              if (!remoteIsNewer && !(hasRemoteProfileFields && localMissingProfileFields)) return localRow
+              changed = true
+              return {
+                ...localRow,
+                phoneNumber: remoteRow.phoneNumber || localRow.phoneNumber || "",
+                addressPresent: remoteRow.addressPresent || localRow.addressPresent || "",
+                avatar: remoteRow.avatar || localRow.avatar || "",
+                signatureData: remoteRow.signatureData || localRow.signatureData || "",
+                profileUpdatedAt: remoteRow.profileUpdatedAt || localRow.profileUpdatedAt || "",
+              }
+            })
+            return changed ? { ...local, staff } : local
+          }
           // If local snapshot already loaded in this session, keep it as source
           // of truth and avoid overwriting with potentially older remote payload.
           if (mounted && !loadedFromLocalFirst) {
@@ -2822,7 +2857,16 @@ export default function Page() {
               }
               setSyncStatus("synced")
             } else {
-              setSyncStatus("loading")
+              const merged = localFirstSnapshot
+                ? mergeStaffProfileUpdates(localFirstSnapshot, parsedRemote)
+                : parsedRemote
+              setStore(merged)
+              try {
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+              } catch {
+                // non-blocking
+              }
+              setSyncStatus("synced")
             }
           }
           loaded = true
