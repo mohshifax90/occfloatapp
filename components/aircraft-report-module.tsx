@@ -1,7 +1,7 @@
 "use client"
 
-import { useMemo, useState } from "react"
-import { BarChart3, CalendarDays, Plane, Search, Upload, Users } from "lucide-react"
+import { useMemo, useRef, useState } from "react"
+import { BarChart3, CalendarDays, FileDown, Plane, Search, Upload, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { DataGrid, type GridColDef } from "@mui/x-data-grid"
 import { BarChart } from "@mui/x-charts/BarChart"
@@ -228,12 +228,13 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
   const [search, setSearch] = useState("")
   const [fromDate, setFromDate] = useState("")
   const [toDate, setToDate] = useState("")
+  const [selectedMonth, setSelectedMonth] = useState("All")
   const [heatMode, setHeatMode] = useState<"BOTH" | "DEP" | "ARR">("BOTH")
   const [selectedQuarter, setSelectedQuarter] = useState("All")
   const [selectedRegs, setSelectedRegs] = useState<Set<string>>(new Set())
   const [selectedOrigins, setSelectedOrigins] = useState<Set<string>>(new Set())
   const [selectedDestinations, setSelectedDestinations] = useState<Set<string>>(new Set())
-  const [showFilterCard, setShowFilterCard] = useState(true)
+  const [showFilterCard, setShowFilterCard] = useState(false)
   const [filtersExpanded, setFiltersExpanded] = useState(true)
   const [openFilterSections, setOpenFilterSections] = useState({
     qtr: true,
@@ -264,6 +265,8 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
     captainAvailable: null as number | null,
     foAvailable: null as number | null,
   })
+  const [pdfReportHtml, setPdfReportHtml] = useState("")
+  const pdfPreviewRef = useRef<HTMLIFrameElement | null>(null)
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -271,6 +274,7 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
       const d = (f.scheduleDate || "").trim()
       if (fromDate && d && d < fromDate) return false
       if (toDate && d && d > toDate) return false
+      if (selectedMonth !== "All" && d.slice(0, 7) !== selectedMonth) return false
       if (selectedQuarter !== "All") {
         const m = d.match(/^(\d{4})-(\d{2})-\d{2}$/)
         if (m) {
@@ -306,13 +310,14 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
         .toLowerCase()
       return blob.includes(q)
     })
-  }, [flights, search, fromDate, toDate, selectedQuarter, selectedRegs, selectedOrigins, selectedDestinations])
+  }, [flights, search, fromDate, toDate, selectedMonth, selectedQuarter, selectedRegs, selectedOrigins, selectedDestinations])
   const filteredAllQuarter = useMemo(() => {
     const q = search.trim().toLowerCase()
     return flights.filter((f) => {
       const d = (f.scheduleDate || "").trim()
       if (fromDate && d && d < fromDate) return false
       if (toDate && d && d > toDate) return false
+      if (selectedMonth !== "All" && d.slice(0, 7) !== selectedMonth) return false
       const reg = (f.aircraft || "").trim()
       if (selectedRegs.size > 0 && !selectedRegs.has(reg)) return false
       const org = (f.origin || "").trim()
@@ -336,8 +341,14 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
         .toLowerCase()
       return blob.includes(q)
     })
-  }, [flights, search, fromDate, toDate, selectedRegs, selectedOrigins, selectedDestinations])
+  }, [flights, search, fromDate, toDate, selectedMonth, selectedRegs, selectedOrigins, selectedDestinations])
   const currentFilterRangeLabel = useMemo(() => {
+    if (selectedMonth !== "All") {
+      const dt = new Date(`${selectedMonth}-01T00:00:00`)
+      return Number.isNaN(dt.getTime())
+        ? selectedMonth
+        : `${dt.toLocaleString("en-US", { month: "short" })}-${String(dt.getFullYear()).slice(-2)}`
+    }
     if (selectedQuarter !== "All") return selectedQuarter
     const fmt = (ymd: string) => {
       const m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/)
@@ -347,7 +358,15 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
     const f = fromDate ? fmt(fromDate) : "start"
     const t = toDate ? fmt(toDate) : "end"
     return `${f} to ${t}`
-  }, [fromDate, toDate, selectedQuarter])
+  }, [fromDate, toDate, selectedMonth, selectedQuarter])
+  const monthOptions = useMemo(() => {
+    const set = new Set<string>()
+    flights.forEach((f) => {
+      const d = (f.scheduleDate || "").trim()
+      if (/^\d{4}-\d{2}-\d{2}$/.test(d)) set.add(d.slice(0, 7))
+    })
+    return ["All", ...Array.from(set).sort()]
+  }, [flights])
   const quarterOptions = useMemo(() => {
     const set = new Set<string>()
     flights.forEach((f) => {
@@ -853,6 +872,224 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
   }, [serviceMonthly, monthlyAvgAircraftRows])
   const serviceSparkLabels = useMemo(() => serviceSparkRows.map((r) => r.label), [serviceSparkRows])
 
+  const exportLandscapePdf = () => {
+    const htmlEscape = (value: unknown) =>
+      String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;")
+    const selectedList = (set: Set<string>) => (set.size ? Array.from(set).join(", ") : "All")
+    const filterRows = [
+      ["Report Tab", tab === "flights" ? "Flights" : tab === "monthly" ? "Monthly" : tab === "service" ? "Service Window" : "Crew Pool"],
+      ["Range", currentFilterRangeLabel],
+      ["Month", selectedMonth],
+      ["Status", flightStatusFilter],
+      ["Search", search || "-"],
+      ["Aircraft", selectedList(selectedRegs)],
+      ["Origins", selectedList(selectedOrigins)],
+      ["Destinations", selectedList(selectedDestinations)],
+    ]
+    const statRows = [
+      ["Flights", stats.legs.toLocaleString()],
+      ["Aircraft", stats.aircraft.toLocaleString()],
+      ["Total Hours", stats.totalHours.toFixed(1)],
+      ["Total Pax", stats.totalPax.toLocaleString()],
+      ["Avg Aircraft / Day", currentCrewMetrics.avgAircraftPerDay.toFixed(2)],
+      ["Avg Block / Day", `${currentCrewMetrics.avgBlockPerDay.toFixed(2)}h`],
+    ]
+    const table = (headers: string[], rows: Array<Array<unknown>>) => `
+      <table>
+        <thead><tr>${headers.map((h) => `<th>${htmlEscape(h)}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${htmlEscape(c)}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table>
+    `
+    const barChart = (
+      title: string,
+      rows: Array<{ label: string; value: number }>,
+      color = "#2563eb",
+    ) => {
+      const data = rows.filter((r) => Number.isFinite(r.value)).slice(0, 18)
+      const max = Math.max(1, ...data.map((r) => r.value))
+      const width = 480
+      const height = 190
+      const pad = { top: 22, right: 12, bottom: 42, left: 34 }
+      const plotW = width - pad.left - pad.right
+      const plotH = height - pad.top - pad.bottom
+      const gap = 4
+      const barW = data.length ? Math.max(6, (plotW - gap * (data.length - 1)) / data.length) : 0
+      return `
+        <div class="chart-card">
+          <div class="chart-title">${htmlEscape(title)}</div>
+          <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img">
+            <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#cbd5e1" />
+            <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#cbd5e1" />
+            ${data.map((r, i) => {
+              const h = (r.value / max) * plotH
+              const x = pad.left + i * (barW + gap)
+              const y = pad.top + plotH - h
+              return `
+                <rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${color}" opacity="0.86" />
+                <text x="${(x + barW / 2).toFixed(2)}" y="${(y - 4).toFixed(2)}" text-anchor="middle" font-size="7" fill="#0f172a">${htmlEscape(Number(r.value.toFixed(1)))}</text>
+                <text x="${(x + barW / 2).toFixed(2)}" y="${height - 20}" text-anchor="end" font-size="7" fill="#475569" transform="rotate(-35 ${(x + barW / 2).toFixed(2)} ${height - 20})">${htmlEscape(r.label)}</text>
+              `
+            }).join("")}
+          </svg>
+        </div>
+      `
+    }
+    const lineChart = (
+      title: string,
+      rows: Array<{ label: string; value: number }>,
+      color = "#0f766e",
+    ) => {
+      const data = rows.filter((r) => Number.isFinite(r.value)).slice(0, 24)
+      const max = Math.max(1, ...data.map((r) => r.value))
+      const width = 480
+      const height = 190
+      const pad = { top: 22, right: 16, bottom: 42, left: 34 }
+      const plotW = width - pad.left - pad.right
+      const plotH = height - pad.top - pad.bottom
+      const points = data.map((r, i) => {
+        const x = pad.left + (data.length <= 1 ? 0 : (i / (data.length - 1)) * plotW)
+        const y = pad.top + plotH - (r.value / max) * plotH
+        return { ...r, x, y }
+      })
+      const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ")
+      return `
+        <div class="chart-card">
+          <div class="chart-title">${htmlEscape(title)}</div>
+          <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img">
+            <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#cbd5e1" />
+            <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#cbd5e1" />
+            <path d="${path}" fill="none" stroke="${color}" stroke-width="2.5" />
+            ${points.map((p, i) => `
+              <circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="2.8" fill="${color}" />
+              ${i % Math.max(1, Math.ceil(points.length / 10)) === 0 ? `<text x="${p.x.toFixed(2)}" y="${height - 20}" text-anchor="end" font-size="7" fill="#475569" transform="rotate(-35 ${p.x.toFixed(2)} ${height - 20})">${htmlEscape(p.label)}</text>` : ""}
+            `).join("")}
+          </svg>
+        </div>
+      `
+    }
+    const flightRows = flightsByStatus.slice(0, 220).map((f) => [
+      f.scheduleDate || "-",
+      getFlightStatus(f),
+      f.flightNo || "-",
+      f.aircraft || "-",
+      `${f.origin || "-"}-${f.destination || "-"}`,
+      f.depTime || "-",
+      f.arrTime || "-",
+      Number(durationHours(f.depTime, f.arrTime).toFixed(2)),
+      f.pax || "-",
+      f.pic || "-",
+      f.sic || "-",
+      f.ca || "-",
+      f.remarks || "-",
+    ])
+    const monthlyRowsForPdf = monthlyTableRows.slice(0, 80).map((r) => [
+      r.month,
+      r.legs,
+      Number(r.hours.toFixed(2)),
+      r.avgAircraft,
+    ])
+    const serviceRowsForPdf = serviceRows.slice(0, 40).map((r) => [
+      r.aircraft,
+      r.days,
+      Number(r.total.toFixed(2)),
+      Number(r.avg.toFixed(2)),
+    ])
+    const crewRowsForPdf = [
+      ["Avg aircraft / day", currentCrewMetrics.avgAircraftPerDay.toFixed(2)],
+      ["Avg block hrs / day", `${currentCrewMetrics.avgBlockPerDay.toFixed(2)}h`],
+      ["Required by FDP", currentCrewMetrics.reqByFdp.toFixed(2)],
+      ["Required by FTL", currentCrewMetrics.reqByFtl.toFixed(2)],
+      ["Core crew / day", currentCrewMetrics.reqCore.toFixed(2)],
+      ["Total crew required", currentCrewMetrics.totalReq.toFixed(2)],
+      ["Crew ratio / aircraft", currentCrewDerived.ratio.toFixed(2)],
+    ]
+    const chartHtml = `
+      <div class="chart-grid">
+        ${barChart("Departures by Hour", hourlyCounts.map((r) => ({ label: `${String(r.h).padStart(2, "0")}:00`, value: r.count })), "#2563eb")}
+        ${lineChart("Monthly Block Hours", monthlyRows.map((r) => ({ label: r.month, value: Number(r.hours.toFixed(2)) })), "#6d28d9")}
+        ${barChart("Top Aircraft Avg Service Hrs", serviceRows.slice(0, 12).map((r) => ({ label: r.aircraft, value: Number(r.avg.toFixed(2)) })), "#0f766e")}
+        ${barChart("Crew Requirement", [
+          { label: "FDP", value: Number(currentCrewMetrics.reqByFdp.toFixed(2)) },
+          { label: "FTL", value: Number(currentCrewMetrics.reqByFtl.toFixed(2)) },
+          { label: "Core", value: Number(currentCrewMetrics.reqCore.toFixed(2)) },
+          { label: "Total", value: Number(currentCrewMetrics.totalReq.toFixed(2)) },
+          { label: "Ratio", value: Number(currentCrewDerived.ratio.toFixed(2)) },
+        ], "#c2410c")}
+      </div>
+    `
+    const generatedAt = new Date().toLocaleString()
+    setPdfReportHtml(`
+      <!doctype html>
+      <html>
+        <head>
+          <title>Aircraft Report</title>
+          <style>
+            @page { size: A4 landscape; margin: 10mm; }
+            * { box-sizing: border-box; }
+            body { font-family: Arial, sans-serif; color: #111827; margin: 0; font-size: 10px; }
+            h1 { font-size: 18px; margin: 0 0 2px; }
+            h2 { font-size: 12px; margin: 12px 0 6px; color: #0f172a; }
+            .muted { color: #64748b; }
+            .header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 8px; }
+            .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+            .chart-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 6px; }
+            .chart-card { border: 1px solid #cbd5e1; padding: 6px; page-break-inside: avoid; }
+            .chart-title { font-size: 10px; font-weight: 700; margin-bottom: 2px; color: #0f172a; }
+            .card { border: 1px solid #cbd5e1; padding: 6px; min-height: 42px; }
+            .label { color: #64748b; font-size: 9px; text-transform: uppercase; }
+            .value { font-size: 14px; font-weight: 700; margin-top: 2px; }
+            table { width: 100%; border-collapse: collapse; page-break-inside: auto; }
+            th, td { border: 1px solid #cbd5e1; padding: 3px 4px; vertical-align: top; }
+            th { background: #e2e8f0; text-align: left; font-weight: 700; }
+            tr { page-break-inside: avoid; page-break-after: auto; }
+            .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+            .small-note { font-size: 9px; margin-top: 4px; }
+            @media print {
+              .no-print { display: none; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div>
+              <h1>Aircraft Report</h1>
+              <div class="muted">Native OCC module with filter + analytics flow</div>
+            </div>
+            <div class="muted">Generated: ${htmlEscape(generatedAt)}</div>
+          </div>
+          <div class="two-col">
+            <div>
+              <h2>Filters</h2>
+              ${table(["Filter", "Value"], filterRows)}
+            </div>
+            <div>
+              <h2>Summary</h2>
+              <div class="grid">${statRows.map(([label, value]) => `
+                <div class="card"><div class="label">${htmlEscape(label)}</div><div class="value">${htmlEscape(value)}</div></div>
+              `).join("")}</div>
+            </div>
+          </div>
+          <h2>Charts</h2>
+          ${chartHtml}
+          <h2>Monthly Analytics</h2>
+          ${table(["Month", "Flights", "Block Hrs", "Avg Aircraft"], monthlyRowsForPdf)}
+          <h2>Service Window Analytics</h2>
+          ${table(["Aircraft", "Days", "Total Service Hrs", "Avg Service Hrs"], serviceRowsForPdf)}
+          <h2>Crew Pool Analytics</h2>
+          ${table(["Metric", "Value"], crewRowsForPdf)}
+          <h2>Filtered Flight Records</h2>
+          <div class="small-note muted">Showing ${flightRows.length.toLocaleString()} of ${flightsByStatus.length.toLocaleString()} filtered records.</div>
+          ${table(["Date", "Status", "Flight", "AC", "Route", "STD", "STA", "Block", "Pax", "PIC", "SIC", "CA", "Remarks"], flightRows)}
+        </body>
+      </html>
+    `)
+  }
+
   const flightCols: GridColDef[] = [
     { field: "scheduleDate", headerName: "Date", width: 110 },
     {
@@ -1063,6 +1300,32 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
           </select>
           <input type="date" className="form-control" style={{ width: 150 }} value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
           <input type="date" className="form-control" style={{ width: 150 }} value={toDate} onChange={(e) => setToDate(e.target.value)} />
+          <select
+            className="form-select"
+            style={{ width: 150 }}
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(e.target.value)}
+          >
+            {monthOptions.map((month) => {
+              const label =
+                month === "All"
+                  ? "Month: All"
+                  : (() => {
+                      const dt = new Date(`${month}-01T00:00:00`)
+                      return Number.isNaN(dt.getTime())
+                        ? month
+                        : `${dt.toLocaleString("en-US", { month: "short" })}-${String(dt.getFullYear()).slice(-2)}`
+                    })()
+              return (
+                <option key={month} value={month}>
+                  {label}
+                </option>
+              )
+            })}
+          </select>
+          <Button size="sm" variant="outline" onClick={exportLandscapePdf}>
+            <FileDown size={14} className="me-1" /> Export PDF
+          </Button>
           <label className="btn btn-outline-secondary mb-0 d-inline-flex align-items-center gap-1">
             <Upload size={14} /> Upload Excel
             <input
@@ -1927,6 +2190,49 @@ export default function AircraftReportModule({ flights, setFlights }: Props) {
       ) : null}
     </div>
       </div>
+      {pdfReportHtml ? (
+        <div
+          className="modal show d-block"
+          tabIndex={-1}
+          style={{ background: "rgba(15, 23, 42, 0.55)" }}
+          onClick={() => setPdfReportHtml("")}
+        >
+          <div className="modal-dialog modal-xl modal-dialog-centered" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content border-0 shadow" style={{ borderRadius: 8 }}>
+              <div className="modal-header py-2">
+                <div>
+                  <div className="fw-semibold">Aircraft Report PDF Preview</div>
+                  <div className="small text-muted">Landscape A4 export</div>
+                </div>
+                <div className="d-flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const win = pdfPreviewRef.current?.contentWindow
+                      if (!win) return
+                      win.focus()
+                      win.print()
+                    }}
+                  >
+                    <FileDown size={14} className="me-1" /> Print / Save PDF
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setPdfReportHtml("")}>
+                    Close
+                  </Button>
+                </div>
+              </div>
+              <div className="modal-body p-0">
+                <iframe
+                  ref={pdfPreviewRef}
+                  title="Aircraft Report PDF Preview"
+                  srcDoc={pdfReportHtml}
+                  style={{ width: "100%", height: "75vh", border: 0, background: "#fff" }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
