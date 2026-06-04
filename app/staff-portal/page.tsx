@@ -1251,25 +1251,22 @@ export default function StaffPortalPage() {
   }) => {
     if (!me) return
     const profileUpdatedAt = new Date().toISOString()
-    let nextStaff: Entry[] = []
-    setStore((prev) => {
-      nextStaff = prev.staff.map((row) =>
-        row.id !== me.id
-          ? row
-          : {
-              ...row,
-              ...(patch.phoneNumber !== undefined ? { phoneNumber: patch.phoneNumber } : {}),
-              ...(patch.addressPresent !== undefined ? { addressPresent: patch.addressPresent } : {}),
-              ...(patch.profilePhoto !== undefined ? { avatar: patch.profilePhoto } : {}),
-              ...(patch.signatureData !== undefined ? { signatureData: patch.signatureData } : {}),
-              profileUpdatedAt,
-            },
-      )
-      return {
-        ...prev,
-        staff: nextStaff,
-      }
-    })
+    const nextStaff = store.staff.map((row) =>
+      row.id !== me.id
+        ? row
+        : {
+            ...row,
+            ...(patch.phoneNumber !== undefined ? { phoneNumber: patch.phoneNumber } : {}),
+            ...(patch.addressPresent !== undefined ? { addressPresent: patch.addressPresent } : {}),
+            ...(patch.profilePhoto !== undefined ? { avatar: patch.profilePhoto } : {}),
+            ...(patch.signatureData !== undefined ? { signatureData: patch.signatureData } : {}),
+            profileUpdatedAt,
+          },
+    )
+    setStore((prev) => ({
+      ...prev,
+      staff: nextStaff,
+    }))
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY)
       const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
