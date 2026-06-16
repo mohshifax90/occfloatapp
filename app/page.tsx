@@ -186,10 +186,60 @@ const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
 const SUPABASE_ROSTER_AUDIT_TABLE = "occfloat_roster_audit_logs"
+const SHEETJS_CDN = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
 const STEP_COLORS = {
   active: "#0d6efd",
   completed: "#198754",
   pending: "#adb5bd",
+}
+
+type SheetJSWindow = Window & {
+  XLSX?: {
+    read: (data: ArrayBuffer, opts: { type: "array"; cellDates?: boolean }) => {
+      SheetNames: string[]
+      Sheets: Record<string, unknown>
+    }
+    utils: {
+      sheet_to_json: (
+        ws: unknown,
+        opts?: {
+          header?: number | "A"
+          raw?: boolean
+          defval?: unknown
+        },
+      ) => unknown[][]
+    }
+  }
+}
+
+let sheetJsLoaderPromise: Promise<void> | null = null
+function loadSheetJs(): Promise<void> {
+  if (typeof window === "undefined") return Promise.reject(new Error("Excel import is available in browser only."))
+  const w = window as SheetJSWindow
+  if (w.XLSX) return Promise.resolve()
+  if (sheetJsLoaderPromise) return sheetJsLoaderPromise
+  sheetJsLoaderPromise = import("xlsx")
+    .then((xlsxModule) => {
+      w.XLSX = xlsxModule as unknown as SheetJSWindow["XLSX"]
+    })
+    .catch(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const existing = document.querySelector(`script[src="${SHEETJS_CDN}"]`) as HTMLScriptElement | null
+          if (existing) {
+            existing.addEventListener("load", () => resolve())
+            existing.addEventListener("error", () => reject(new Error("Failed to load Excel parser.")))
+            return
+          }
+          const script = document.createElement("script")
+          script.src = SHEETJS_CDN
+          script.async = true
+          script.onload = () => resolve()
+          script.onerror = () => reject(new Error("Failed to load Excel parser."))
+          document.head.appendChild(script)
+        }),
+    )
+  return sheetJsLoaderPromise
 }
 
 function getAttendanceStepIndexFromForm(form: Record<string, string>): number {
@@ -1260,6 +1310,40 @@ function formatDateToYmdHm(date: Date): { ymd: string; hm: string } {
   }
 }
 
+type RosterDayTimingSegment = {
+  day: string
+  type: string
+  restFrom: string
+  restTo: string
+  rosterFrom: string
+  rosterTo: string
+}
+
+function buildRosterDaySegments(startDateTime: Date, endDateTime: Date, segmentType: string) {
+  const segments: RosterDayTimingSegment[] = []
+  if (endDateTime <= startDateTime) return segments
+  let cursor = new Date(startDateTime)
+  while (cursor < endDateTime) {
+    const day = toYmd(cursor)
+    const nextDayStart = new Date(`${addDaysToYmd(day, 1)}T00:00:00`)
+    const segmentEnd = endDateTime < nextDayStart ? endDateTime : nextDayStart
+    const from = formatDateToYmdHm(cursor).hm
+    const toMeta = formatDateToYmdHm(segmentEnd)
+    const to = toMeta.ymd === day ? toMeta.hm : "23:59"
+    const isRest = segmentType === "REST"
+    segments.push({
+      day,
+      type: segmentType,
+      restFrom: isRest ? from : "",
+      restTo: isRest ? to : "",
+      rosterFrom: isRest ? "" : from,
+      rosterTo: isRest ? "" : to,
+    })
+    cursor = segmentEnd
+  }
+  return segments
+}
+
 function getDateRangeInclusive(fromDate: string, toDate: string): Date[] {
   const start = new Date(`${fromDate}T00:00:00`)
   const end = new Date(`${toDate}T00:00:00`)
@@ -1326,6 +1410,34 @@ function calculateShiftDurationHoursFromTimes(startTime: string, endTime: string
   return duration / 60
 }
 
+const DEFAULT_CREW_DUTY_TYPES = [
+  { dutyType: "Flight Duty", rosterBarMap: "ROSTER DAY" },
+  { dutyType: "Ground Duty", rosterBarMap: "ROSTER DAY" },
+  { dutyType: "Release - OF", rosterBarMap: "REST" },
+]
+
+function getCrewDutyRosterBarMap(dutyType: string): "REST" | "ROSTER DAY" {
+  const normalized = dutyType.trim().toLowerCase()
+  const match = DEFAULT_CREW_DUTY_TYPES.find((row) => row.dutyType.toLowerCase() === normalized)
+  if (match?.rosterBarMap === "REST") return "REST"
+  if (normalized.includes("of") || normalized.includes("release") || normalized.includes("rest")) return "REST"
+  return "ROSTER DAY"
+}
+
+function getDefaultDutyCodeColor(code: string): string {
+  const palette: Record<string, string> = {
+    FD: "#0ea5a5",
+    GD: "#2563eb",
+    OF: "#334155",
+    DP: "#f97316",
+  }
+  const normalized = code.trim().toUpperCase()
+  if (palette[normalized]) return palette[normalized]
+  const colors = ["#0f766e", "#1d4ed8", "#7c3aed", "#be123c", "#b45309", "#047857", "#4338ca"]
+  const seed = normalized.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 0)
+  return colors[seed % colors.length]
+}
+
 function combineDateAndTime(ymd: string, hhmm: string): Date {
   return new Date(`${ymd}T${hhmm || "00:00"}:00`)
 }
@@ -1343,6 +1455,28 @@ function getCurrentMonthRange() {
   const now = new Date()
   const first = new Date(now.getFullYear(), now.getMonth(), 1)
   const last = new Date(now.getFullYear(), now.getMonth() + 1, 0)
+  return { fromDate: toYmd(first), toDate: toYmd(last) }
+}
+
+function getCurrentAndNextMonthRange() {
+  const now = new Date()
+  const first = new Date(now.getFullYear(), now.getMonth(), 1)
+  const last = new Date(now.getFullYear(), now.getMonth() + 2, 0)
+  return { fromDate: toYmd(first), toDate: toYmd(last) }
+}
+
+function getCurrentSixMonthRange() {
+  const now = new Date()
+  const first = new Date(now.getFullYear(), now.getMonth(), 1)
+  const last = new Date(now.getFullYear(), now.getMonth() + 6, 0)
+  return { fromDate: toYmd(first), toDate: toYmd(last) }
+}
+
+function getSixMonthRangeFromDate(ymd?: string) {
+  const base = ymd ? new Date(`${ymd}T00:00:00`) : new Date()
+  const safeBase = Number.isNaN(base.getTime()) ? new Date() : base
+  const first = new Date(safeBase.getFullYear(), safeBase.getMonth(), 1)
+  const last = new Date(safeBase.getFullYear(), safeBase.getMonth() + 6, 0)
   return { fromDate: toYmd(first), toDate: toYmd(last) }
 }
 
@@ -1415,6 +1549,7 @@ export default function Page() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const forceRemoteSyncRef = useRef(false)
   const rosterUploadInputRef = useRef<HTMLInputElement | null>(null)
+  const crewRosterExcelInputRef = useRef<HTMLInputElement | null>(null)
   const rosterGridWrapRef = useRef<HTMLDivElement | null>(null)
   const hasLoadedRef = useRef(false)
   const disableRemoteSyncRef = useRef(false)
@@ -1458,6 +1593,8 @@ export default function Page() {
   const [crewLeavePlannerTab, setCrewLeavePlannerTab] = useState<
     | "rotationTypes"
     | "attendanceCodes"
+    | "dutyTypes"
+    | "dutyCodes"
     | "dailyAttendance"
     | "leavePatternManager"
     | "generator"
@@ -1473,6 +1610,7 @@ export default function Page() {
   const [leaveDetailModal, setLeaveDetailModal] = useState<{
     open: boolean
     blockId: string
+    actualLeaveSegmentId?: string
     crewCode: string
     crewName: string
     cycleNumber: string
@@ -1482,6 +1620,7 @@ export default function Page() {
   }>({
     open: false,
     blockId: "",
+    actualLeaveSegmentId: "",
     crewCode: "",
     crewName: "",
     cycleNumber: "",
@@ -1491,6 +1630,8 @@ export default function Page() {
   })
   const [leaveDetailDraft, setLeaveDetailDraft] = useState({ start: "", end: "" })
   const [leaveDetailSelectedCycle, setLeaveDetailSelectedCycle] = useState("")
+  const [editingLeaveSegmentId, setEditingLeaveSegmentId] = useState("")
+  const [editingLeaveSegmentDraft, setEditingLeaveSegmentDraft] = useState({ cycleNumber: "", start: "", end: "" })
   const [isRotationModalOpen, setIsRotationModalOpen] = useState(false)
   const [editingRotationId, setEditingRotationId] = useState<string | null>(null)
   const [crewLeaveBlocksFilter, setCrewLeaveBlocksFilter] = useState({
@@ -1498,21 +1639,26 @@ export default function Page() {
     fromDate: "",
     toDate: "",
   })
-  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState(() => getCurrentMonthRange())
+  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState(() => getCurrentAndNextMonthRange())
   const [crewLeaveTimelineCrewTypeFilter, setCrewLeaveTimelineCrewTypeFilter] = useState("Captain")
   const [showTimelineWpLpSummary, setShowTimelineWpLpSummary] = useState(true)
+  const [showTimelineWorkBars, setShowTimelineWorkBars] = useState(true)
+  const [showTimelineLeaveBars, setShowTimelineLeaveBars] = useState(true)
   const [isCrewRosterGeneratorOpen, setIsCrewRosterGeneratorOpen] = useState(false)
+  const defaultCrewRosterGenerationRange = useMemo(() => getCurrentSixMonthRange(), [])
   const [crewRosterGeneratorForm, setCrewRosterGeneratorForm] = useState({
-    fromDate: `${new Date().getFullYear()}-01-01`,
-    toDate: `${new Date().getFullYear()}-12-31`,
+    fromDate: defaultCrewRosterGenerationRange.fromDate,
+    toDate: defaultCrewRosterGenerationRange.toDate,
     crewCode: "",
     useFixedRestWeekday: false,
     fixedRestWeekdays: [] as string[],
-    maxRecoveryRestGap: "48",
+    defaultDutyCode: "FD",
+    dutyCodeSequence: "FD",
+    maxDutyTimePerDay: "13",
+    maxRecoveryRestGap: "110",
     restPeriod: "58",
     localNight: "22:00-06:00",
     localDay: "06:00-22:00",
-    fdpFiveDayTotalHours: "109.5",
   })
   const [crewRosterGeneratorTab, setCrewRosterGeneratorTab] = useState<"setup" | "rules">("setup")
   const [crewLeaveTimelineDayWidth, setCrewLeaveTimelineDayWidth] = useState(36)
@@ -1520,9 +1666,11 @@ export default function Page() {
   const leaveBarDragRef = useRef<{
     blockId: string
     startX: number
+    startY: number
     moved: boolean
   } | null>(null)
   const lastLeaveBarDragAtRef = useRef(0)
+  const lastRosterBarSelectionAtRef = useRef(0)
   const isCrewLeavePlannerActive = activeModule === "crewLeavePlanner"
   const isCrewTimelineActive = isCrewLeavePlannerActive && crewLeavePlannerTab === "timeline"
   const isCrewBlocksActive = isCrewLeavePlannerActive && crewLeavePlannerTab === "blocks"
@@ -1554,7 +1702,16 @@ export default function Page() {
     endDate: string
     endTime: string
     durationHours: string
-    daySegments: Array<{ day: string; from: string; to: string }>
+    daySegments: RosterDayTimingSegment[]
+    dutyAssignments: Array<{
+      id: string
+      code: string
+      dutyType: string
+      startDate: string
+      startTime: string
+      endDate: string
+      endTime: string
+    }>
   }>({
     open: false,
     crewCode: "",
@@ -1566,12 +1723,78 @@ export default function Page() {
     endTime: "",
     durationHours: "",
     daySegments: [],
+    dutyAssignments: [],
+  })
+  const [pendingActualLeaveDrop, setPendingActualLeaveDrop] = useState<{
+    open: boolean
+    sourceBlockId: string
+    crewCode: string
+    crewName: string
+    cycleNumber: string
+    startDate: string
+    endDate: string
+    plannedDays: number
+    conflicts: Array<{ type: string; code: string; start: string; end: string; startTime: string; endTime: string }>
+    override: boolean
+  }>({
+    open: false,
+    sourceBlockId: "",
+    crewCode: "",
+    crewName: "",
+    cycleNumber: "",
+    startDate: "",
+    endDate: "",
+    plannedDays: 0,
+    conflicts: [],
+    override: false,
+  })
+  const [pendingCrewDutyDrop, setPendingCrewDutyDrop] = useState<{
+    open: boolean
+    crewCode: string
+    crewName: string
+    code: string
+    dutyType: string
+    rosterBarMap: "REST" | "ROSTER DAY"
+    startDate: string
+    startTime: string
+    endDate: string
+    endTime: string
+    conflicts: Array<{ id: string; type: string; code: string; start: string; end: string; startTime: string; endTime: string }>
+    mode: "override" | "after"
+  }>({
+    open: false,
+    crewCode: "",
+    crewName: "",
+    code: "",
+    dutyType: "",
+    rosterBarMap: "ROSTER DAY",
+    startDate: "",
+    startTime: "",
+    endDate: "",
+    endTime: "",
+    conflicts: [],
+    mode: "override",
   })
   const [crewOpsCodeForm, setCrewOpsCodeForm] = useState({
     code: "MC",
     name: "",
     allowLeaveDeduction: "Yes",
   })
+  const [crewDutyCodeForm, setCrewDutyCodeForm] = useState({
+    code: "",
+    name: "",
+    dutyType: "Flight Duty",
+    startTime: "00:00",
+    endTime: "00:00",
+    color: "#0ea5a5",
+  })
+  const [editingCrewDutyCodeId, setEditingCrewDutyCodeId] = useState<string | null>(null)
+  const [crewDutyTypeForm, setCrewDutyTypeForm] = useState({
+    dutyType: "",
+    rosterBarMap: "ROSTER DAY",
+  })
+  const [editingCrewDutyTypeId, setEditingCrewDutyTypeId] = useState<string | null>(null)
+  const [editingCrewDutyTypeName, setEditingCrewDutyTypeName] = useState("")
   // Conflict-detection config: max number of crew (of a given crewType) allowed
   // to be on leave on the same day. "_default" applies when a specific crewType
   // entry is missing.
@@ -1745,6 +1968,58 @@ export default function Page() {
       ),
     [store.crewLeavePlanner],
   )
+  const crewDutyCodeConfigs = useMemo(
+    () =>
+      store.crewLeavePlanner.filter(
+        (row) => (row.recordType || "").trim().toLowerCase() === "dutycodeconfig",
+      ),
+    [store.crewLeavePlanner],
+  )
+  const crewDutyTypeConfigs = useMemo(() => {
+    const map = new Map<string, Entry>()
+    DEFAULT_CREW_DUTY_TYPES.forEach((row) => {
+      map.set(row.dutyType.toLowerCase(), {
+        id: `default-duty-type-${row.dutyType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        createdAt: "",
+        recordType: "dutyTypeConfig",
+        dutyType: row.dutyType,
+        rosterBarMap: row.rosterBarMap,
+        isDefault: "Yes",
+      })
+    })
+    store.crewLeavePlanner
+      .filter((row) => (row.recordType || "").trim().toLowerCase() === "dutytypeconfig")
+      .forEach((row) => {
+        const dutyType = (row.dutyType || "").trim()
+        if (!dutyType) return
+        if (row.hidden === "Yes") {
+          map.delete(dutyType.toLowerCase())
+          return
+        }
+        map.set(dutyType.toLowerCase(), { ...row, isDefault: row.isDefault || "No" })
+      })
+    return Array.from(map.values()).sort((a, b) =>
+      (a.dutyType || "").localeCompare(b.dutyType || "", undefined, { sensitivity: "base" }),
+    )
+  }, [store.crewLeavePlanner])
+  const crewDutyTypeMap = useMemo(() => {
+    const map = new Map<string, string>()
+    crewDutyTypeConfigs.forEach((row) => {
+      const dutyType = (row.dutyType || "").trim()
+      if (!dutyType) return
+      map.set(dutyType.toLowerCase(), row.rosterBarMap === "REST" ? "REST" : "ROSTER DAY")
+    })
+    return map
+  }, [crewDutyTypeConfigs])
+  const crewDutyCodeColorMap = useMemo(() => {
+    const map = new Map<string, string>()
+    crewDutyCodeConfigs.forEach((row) => {
+      const code = (row.code || "").trim().toUpperCase()
+      if (!code) return
+      map.set(code, row.color || getDefaultDutyCodeColor(code))
+    })
+    return map
+  }, [crewDutyCodeConfigs])
   const crewOpsCodeAllowMap = useMemo(() => {
     const map = new Map<string, boolean>()
     crewOpsCodeConfigs.forEach((row) => {
@@ -1880,6 +2155,28 @@ export default function Page() {
       }
       crewMap.get(crewCode)?.rosterBars.push(r)
     })
+    crewMap.forEach((row) => {
+      row.blocks.sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""))
+      const seenActualLeaveBars = new Set<string>()
+      row.rosterBars = row.rosterBars.filter((bar) => {
+        if ((bar.rosterType || "").trim().toUpperCase() !== "ACTUAL LEAVE") return true
+        const key = [
+          normalizeCrewCode(bar.crewCode || ""),
+          (bar.sourceBlockId || "").trim() || (bar.cycleNumber || "").trim(),
+          (bar.startDate || "").trim(),
+          (bar.endDate || bar.startDate || "").trim(),
+        ].join("::")
+        if (seenActualLeaveBars.has(key)) return false
+        seenActualLeaveBars.add(key)
+        return true
+      })
+      row.rosterBars.sort((a, b) => {
+        const aActual = (a.rosterType || "").trim().toUpperCase() === "ACTUAL LEAVE"
+        const bActual = (b.rosterType || "").trim().toUpperCase() === "ACTUAL LEAVE"
+        if (aActual !== bActual) return aActual ? 1 : -1
+        return (a.startDate || "").localeCompare(b.startDate || "")
+      })
+    })
     const staffNoByCrewCode = new Map<string, string>()
     store.crewDataBase.forEach((c) => {
       const code = normalizeCrewCode(c.crewCode || "")
@@ -1914,7 +2211,7 @@ export default function Page() {
   ])
   useEffect(() => {
     if (!isCrewTimelineActive) return
-    setCrewLeaveTimelineFilter(getCurrentMonthRange())
+    setCrewLeaveTimelineFilter(getCurrentAndNextMonthRange())
   }, [isCrewTimelineActive])
   useEffect(() => {
     if (!isCrewTimelineActive) return
@@ -2242,6 +2539,26 @@ export default function Page() {
         .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""))
     )
   }, [store.crewLeavePlanner, leaveDetailModal, leaveDetailActiveCycleNumber])
+  const leaveDetailUnassignedActualLeaveSegments = useMemo(() => {
+    if (!leaveDetailModal.open) return [] as Entry[]
+    const crewCode = normalizeCrewCode(leaveDetailModal.crewCode || "")
+    return store.crewLeavePlanner
+      .filter((row) => (row.recordType || "").trim().toLowerCase() === "actualleavesegment")
+      .filter((row) => normalizeCrewCode(row.crewCode || "") === crewCode)
+      .filter((row) => !(row.cycleNumber || "").trim() || !(row.sourceBlockId || "").trim())
+      .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || ""))
+  }, [store.crewLeavePlanner, leaveDetailModal])
+  const leaveDetailSelectedActualLeaveSegment = useMemo(() => {
+    const segmentId = (leaveDetailModal.actualLeaveSegmentId || "").trim()
+    if (!segmentId) return null
+    return (
+      store.crewLeavePlanner.find(
+        (row) =>
+          row.id === segmentId &&
+          (row.recordType || "").trim().toLowerCase() === "actualleavesegment",
+      ) || null
+    )
+  }, [store.crewLeavePlanner, leaveDetailModal.actualLeaveSegmentId])
   const leaveDetailGeneratedRows = useMemo(() => {
     if (!leaveDetailModal.open) return [] as Entry[]
     const crewCode = normalizeCrewCode(leaveDetailModal.crewCode || "")
@@ -5980,6 +6297,186 @@ export default function Page() {
     }))
   }
 
+  const resetCrewDutyTypeForm = () => {
+    setCrewDutyTypeForm({
+      dutyType: "",
+      rosterBarMap: "ROSTER DAY",
+    })
+    setEditingCrewDutyTypeId(null)
+    setEditingCrewDutyTypeName("")
+  }
+
+  const saveCrewDutyType = () => {
+    const dutyType = (crewDutyTypeForm.dutyType || "").trim()
+    const rosterBarMap = crewDutyTypeForm.rosterBarMap === "REST" ? "REST" : "ROSTER DAY"
+    if (!dutyType) {
+      window.alert("Duty type is required.")
+      return
+    }
+    setStore((prev) => {
+      const existingById = editingCrewDutyTypeId
+        ? prev.crewLeavePlanner.find((row) => row.id === editingCrewDutyTypeId)
+        : undefined
+      const existingByName = prev.crewLeavePlanner.find(
+        (row) =>
+          (row.recordType || "").trim().toLowerCase() === "dutytypeconfig" &&
+          (row.dutyType || "").trim().toLowerCase() === dutyType.toLowerCase(),
+      )
+      const isEditing = Boolean(editingCrewDutyTypeName)
+      if (existingByName && (!isEditing || existingByName.id !== existingById?.id)) {
+        window.alert(`Duty type "${dutyType}" already exists.`)
+        return prev
+      }
+      const existing = existingById
+      const entry: Entry = {
+        id: existing?.id || `cdt_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        recordType: "dutyTypeConfig",
+        dutyType,
+        rosterBarMap,
+        isDefault: existing?.isDefault || "No",
+      }
+      const next = existing
+        ? prev.crewLeavePlanner.map((row) => (row.id === existing.id ? entry : row))
+        : [entry, ...prev.crewLeavePlanner]
+      return { ...prev, crewLeavePlanner: next }
+    })
+    resetCrewDutyTypeForm()
+  }
+
+  const editCrewDutyType = (id: string) => {
+    const row = crewDutyTypeConfigs.find((x) => x.id === id)
+    if (!row) return
+    setEditingCrewDutyTypeId(id.startsWith("default-duty-type-") ? null : id)
+    setEditingCrewDutyTypeName(row.dutyType || "")
+    setCrewDutyTypeForm({
+      dutyType: row.dutyType || "Flight Duty",
+      rosterBarMap: row.rosterBarMap === "REST" ? "REST" : "ROSTER DAY",
+    })
+  }
+
+  const deleteCrewDutyType = (id: string) => {
+    const target = crewDutyTypeConfigs.find((row) => row.id === id)
+    const dutyType = (target?.dutyType || "").trim()
+    if (!window.confirm("Delete this duty type?")) return
+    if (id.startsWith("default-duty-type-")) {
+      if (!dutyType) return
+      setStore((prev) => ({
+        ...prev,
+        crewLeavePlanner: [
+          {
+            id: `cdt_hidden_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+            createdAt: new Date().toISOString(),
+            recordType: "dutyTypeConfig",
+            dutyType,
+            rosterBarMap: target?.rosterBarMap === "REST" ? "REST" : "ROSTER DAY",
+            hidden: "Yes",
+            isDefault: "Yes",
+          },
+          ...prev.crewLeavePlanner,
+        ],
+      }))
+      if (editingCrewDutyTypeName === dutyType) resetCrewDutyTypeForm()
+      return
+    }
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== id),
+    }))
+    if (editingCrewDutyTypeId === id) resetCrewDutyTypeForm()
+    if (editingCrewDutyTypeName && dutyType === editingCrewDutyTypeName) {
+      resetCrewDutyTypeForm()
+    }
+  }
+
+  const resetCrewDutyCodeForm = () => {
+    setCrewDutyCodeForm({
+      code: "",
+      name: "",
+      dutyType: "Flight Duty",
+      startTime: "00:00",
+      endTime: "00:00",
+      color: "#0ea5a5",
+    })
+    setEditingCrewDutyCodeId(null)
+  }
+
+  const saveCrewDutyCode = () => {
+    const code = (crewDutyCodeForm.code || "").trim().toUpperCase()
+    const name = (crewDutyCodeForm.name || "").trim()
+    const dutyType = (crewDutyCodeForm.dutyType || "Flight Duty").trim()
+    const startTime = (crewDutyCodeForm.startTime || "").trim()
+    const endTime = (crewDutyCodeForm.endTime || "").trim()
+    const color = (crewDutyCodeForm.color || getDefaultDutyCodeColor(code)).trim()
+    if (!code) {
+      window.alert("Duty code is required.")
+      return
+    }
+    if (!name) {
+      window.alert("Duty name is required.")
+      return
+    }
+    if (!startTime || !endTime) {
+      window.alert("Default start and end time are required.")
+      return
+    }
+    setStore((prev) => {
+      const duplicate = prev.crewLeavePlanner.find(
+        (row) =>
+          (row.recordType || "").trim().toLowerCase() === "dutycodeconfig" &&
+          row.id !== editingCrewDutyCodeId &&
+          (row.code || "").trim().toUpperCase() === code,
+      )
+      if (duplicate) {
+        window.alert(`Duty code "${code}" already exists.`)
+        return prev
+      }
+      const existing = editingCrewDutyCodeId
+        ? prev.crewLeavePlanner.find((row) => row.id === editingCrewDutyCodeId)
+        : undefined
+      const entry: Entry = {
+        id: existing?.id || `cdc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        recordType: "dutyCodeConfig",
+        code,
+        dutyName: name,
+        dutyType,
+        rosterBarMap: crewDutyTypeMap.get(dutyType.toLowerCase()) || getCrewDutyRosterBarMap(dutyType),
+        defaultStartTime: startTime,
+        defaultEndTime: endTime,
+        color,
+      }
+      const next = existing
+        ? prev.crewLeavePlanner.map((row) => (row.id === existing.id ? entry : row))
+        : [entry, ...prev.crewLeavePlanner]
+      return { ...prev, crewLeavePlanner: next }
+    })
+    resetCrewDutyCodeForm()
+  }
+
+  const editCrewDutyCode = (id: string) => {
+    const row = crewDutyCodeConfigs.find((x) => x.id === id)
+    if (!row) return
+    setEditingCrewDutyCodeId(id)
+    setCrewDutyCodeForm({
+      code: (row.code || "").trim().toUpperCase(),
+      name: row.dutyName || "",
+      dutyType: row.dutyType || "Flight Duty",
+      startTime: row.defaultStartTime || "00:00",
+      endTime: row.defaultEndTime || "00:00",
+      color: row.color || getDefaultDutyCodeColor(row.code || ""),
+    })
+  }
+
+  const deleteCrewDutyCode = (id: string) => {
+    if (!window.confirm("Delete this duty code?")) return
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== id),
+    }))
+    if (editingCrewDutyCodeId === id) resetCrewDutyCodeForm()
+  }
+
   const generateCrewLeaveBlocks = () => {
     const selectedCrewCode = normalizeCrewCode(
       crewLeaveAssignmentForm.crewCode || crewLeaveGeneratorForm.crewCode || "",
@@ -6115,13 +6612,57 @@ export default function Page() {
     const selectedCrewCode = normalizeCrewCode(crewRosterGeneratorForm.crewCode || "")
     const weekdayName = (ymd: string) =>
       new Date(`${ymd}T00:00:00`).toLocaleDateString("en-US", { weekday: "long" })
-    const weekdayIndex = (name: string): number => {
-      const order = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-      return Math.max(0, order.indexOf(name))
+    const maxRecoveryRestGapHours = Number(crewRosterGeneratorForm.maxRecoveryRestGap || "0")
+    if (!Number.isFinite(maxRecoveryRestGapHours) || maxRecoveryRestGapHours <= 0) {
+      window.alert("Maximum Time Between Two Recovery Rest Period must be greater than 0.")
+      return
     }
-    const fdpFiveDayTotalHours = Number(crewRosterGeneratorForm.fdpFiveDayTotalHours || "0")
-    if (!Number.isFinite(fdpFiveDayTotalHours) || fdpFiveDayTotalHours <= 0) {
-      window.alert("FDP 5 Days Total Hours must be greater than 0.")
+    const dutyCodeByCode = new Map<string, Entry>()
+    crewDutyCodeConfigs.forEach((row) => {
+      const code = (row.code || "").trim().toUpperCase()
+      if (code) dutyCodeByCode.set(code, row)
+    })
+    const selectedDefaultDutyCode = (crewRosterGeneratorForm.defaultDutyCode || "FD").trim().toUpperCase()
+    const defaultDutyConfig = dutyCodeByCode.get(selectedDefaultDutyCode)
+    if (!defaultDutyConfig) {
+      window.alert(`Default Duty Code ${selectedDefaultDutyCode || "FD"} is not found in Duty Code Manager.`)
+      return
+    }
+    const selectedDefaultDutyType = (defaultDutyConfig.dutyType || "Flight Duty").trim()
+    const selectedDefaultDutyMap =
+      crewDutyTypeMap.get(selectedDefaultDutyType.toLowerCase()) ||
+      defaultDutyConfig.rosterBarMap ||
+      getCrewDutyRosterBarMap(selectedDefaultDutyType)
+    if (selectedDefaultDutyMap === "REST") {
+      window.alert("Default Duty Code must map to Roster Day, not Rest.")
+      return
+    }
+    const maxDutyTimePerDayHours = Number(crewRosterGeneratorForm.maxDutyTimePerDay || "13")
+    if (!Number.isFinite(maxDutyTimePerDayHours) || maxDutyTimePerDayHours <= 0) {
+      window.alert("Maximum Duty Time / Day must be greater than 0.")
+      return
+    }
+    const dutySequenceCodes = (crewRosterGeneratorForm.dutyCodeSequence || selectedDefaultDutyCode)
+      .split(",")
+      .map((code) => code.trim().toUpperCase())
+      .filter(Boolean)
+    if (dutySequenceCodes.length === 0) {
+      window.alert("Enter at least one Duty Code in Duty Code Sequence.")
+      return
+    }
+    const dutySequenceConfigs = dutySequenceCodes.map((code) => {
+      const config = dutyCodeByCode.get(code)
+      if (!config) return null
+      const dutyType = (config.dutyType || "Flight Duty").trim()
+      const map =
+        crewDutyTypeMap.get(dutyType.toLowerCase()) ||
+        config.rosterBarMap ||
+        getCrewDutyRosterBarMap(dutyType)
+      if (map === "REST") return null
+      return { code, config, dutyType }
+    })
+    if (dutySequenceConfigs.some((item) => !item)) {
+      window.alert("Duty Code Sequence can only include valid codes mapped to Roster Day.")
       return
     }
     const targetCrews = Array.from(
@@ -6204,41 +6745,44 @@ export default function Page() {
       while (addDaysToYmd(cursor, 6) < ovStart) {
         cursor = addDaysToYmd(cursor, 7)
       }
+      let nextRosterDayStartDt: Date | null = null
       if (
         selectedCrewCode &&
         crewRosterGeneratorForm.useFixedRestWeekday &&
         crewRosterGeneratorForm.fixedRestWeekdays.length > 0
       ) {
-        const selected = [...crewRosterGeneratorForm.fixedRestWeekdays].sort(
-          (a, b) => weekdayIndex(a) - weekdayIndex(b),
-        )
-        const targetOffStartWeekday = selected[0] || "Saturday"
-        const targetIdx = weekdayIndex(targetOffStartWeekday)
+        const selectedRestDays = new Set(crewRosterGeneratorForm.fixedRestWeekdays)
+        let firstRestDate = ovStart
         let guard = 0
         while (guard < 14) {
-          const cycleStartIdx = weekdayIndex(weekdayName(cursor))
-          const offStartIdx = (cycleStartIdx + 5) % 7
-          if (offStartIdx === targetIdx) break
-          cursor = addDaysToYmd(cursor, 1)
+          if (selectedRestDays.has(weekdayName(firstRestDate))) break
+          firstRestDate = addDaysToYmd(firstRestDate, 1)
           guard += 1
         }
+        const firstRestStartDt = addHoursToDate(parseLocalDateTime(firstRestDate, "00:00"), -4.5)
+        nextRosterDayStartDt = addHoursToDate(firstRestStartDt, -maxRecoveryRestGapHours)
       }
-      while (cursor <= ovEnd) {
+      if (!nextRosterDayStartDt) {
+        nextRosterDayStartDt = parseLocalDateTime(cursor, "05:30")
+      }
+      const rosterWindowEndDt = parseLocalDateTime(ovEnd, "23:59")
+      let cycleGuard = 0
+      while (nextRosterDayStartDt <= rosterWindowEndDt && cycleGuard < 500) {
         const addRosterSegment = (
           segmentStart: Date,
           segmentEnd: Date,
           rosterType: "REST" | "ROSTER DAY",
           note: string,
-        ) => {
+        ): Date | null => {
           const segmentMaxEnd = rosterType === "ROSTER DAY" ? ovEnd : rosterWindowEnd
           const windowStartDt = parseLocalDateTime(ovStart, "00:00")
           const windowEndDt = parseLocalDateTime(segmentMaxEnd, "23:59")
           const effectiveStartDt = segmentStart > windowStartDt ? segmentStart : windowStartDt
           const effectiveEndDt = segmentEnd < windowEndDt ? segmentEnd : windowEndDt
-          if (effectiveEndDt <= effectiveStartDt) return
+          if (effectiveEndDt <= effectiveStartDt) return null
           const durationHours =
             (effectiveEndDt.getTime() - effectiveStartDt.getTime()) / (60 * 60 * 1000)
-          if (durationHours < 2 / 60) return
+          if (durationHours < 2 / 60) return null
           const segmentStartMeta = formatDateToYmdHm(effectiveStartDt)
           const segmentEndMeta = formatDateToYmdHm(effectiveEndDt)
           const cycleNumberForSegment = (() => {
@@ -6266,24 +6810,84 @@ export default function Page() {
             rosterType,
             sourceBlockId: "",
             maxRecoveryRestGap: crewRosterGeneratorForm.maxRecoveryRestGap,
-            restPeriod: "48h (+ Day-5 post-FDP rest)",
+            restPeriod: `${crewRosterGeneratorForm.restPeriod || "58"}h`,
             localNight: crewRosterGeneratorForm.localNight,
             localDay: crewRosterGeneratorForm.localDay,
-            fdpFiveDayTotalHours: String(fdpFiveDayTotalHours),
+            maxTimeBetweenRecoveryRestHours: String(maxRecoveryRestGapHours),
             fdpPattern: note,
           })
+          if (rosterType !== "ROSTER DAY") return null
+          let lastDutyEndDt: Date | null = null
+          getDateRangeInclusive(segmentStartMeta.ymd, segmentEndMeta.ymd).forEach((dayDate) => {
+            const dayYmd = toYmd(dayDate)
+            let assignedHours = 0
+            dutySequenceConfigs.forEach((item) => {
+              if (!item) return
+              const { code: dutyCode, config: dutyConfig, dutyType } = item
+              const dutyStartTime = (dutyConfig.defaultStartTime || "00:00").trim()
+              const dutyEndTime = (dutyConfig.defaultEndTime || "23:59").trim()
+              const dutyStartDt = parseLocalDateTime(dayYmd, dutyStartTime)
+              const dutyEndDt = parseLocalDateTime(
+                dutyEndTime <= dutyStartTime && dutyEndTime !== "23:59" ? addDaysToYmd(dayYmd, 1) : dayYmd,
+                dutyEndTime,
+              )
+              const clippedStartDt = dutyStartDt > effectiveStartDt ? dutyStartDt : effectiveStartDt
+              const clippedEndDt = dutyEndDt < effectiveEndDt ? dutyEndDt : effectiveEndDt
+              if (clippedEndDt <= clippedStartDt) return
+              const dutyHours = (clippedEndDt.getTime() - clippedStartDt.getTime()) / (60 * 60 * 1000)
+              if (assignedHours + dutyHours > maxDutyTimePerDayHours + 0.01) return
+              assignedHours += dutyHours
+              if (!lastDutyEndDt || clippedEndDt > lastDutyEndDt) lastDutyEndDt = clippedEndDt
+              const dutyStartMeta = formatDateToYmdHm(clippedStartDt)
+              const dutyEndMeta = formatDateToYmdHm(clippedEndDt)
+              newRosterRows.push({
+                id: `grb_duty_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+                createdAt: new Date().toISOString(),
+                recordType: "generatedRoster",
+                crewCode,
+                crewName: crewRow.crewName || "",
+                crewType: crewRow.crewType || "",
+                cycleNumber: cycleNumberForSegment,
+                startDate: dutyStartMeta.ymd,
+                endDate: dutyEndMeta.ymd,
+                startTime: dutyStartMeta.hm,
+                endTime: dutyEndMeta.hm,
+                rosterType: "DUTY CODE",
+                dutyCode,
+                dutyType,
+                dutyColor: dutyConfig.color || getDefaultDutyCodeColor(dutyCode),
+                sourceBlockId: "",
+                maxDutyTimePerDayHours: String(maxDutyTimePerDayHours),
+                fdpPattern: `Auto sequence ${dutySequenceCodes.join(", ")}`,
+              })
+            })
+          })
+          return lastDutyEndDt
         }
 
-        const cycleStart = parseLocalDateTime(cursor, "00:00")
-        const fdpStart = addHoursToDate(cycleStart, 5.5)
-        const fdpEnd = addHoursToDate(fdpStart, fdpFiveDayTotalHours)
-        addRosterSegment(fdpStart, fdpEnd, "ROSTER DAY", "Day-1 05:30 through Day-5 FDP")
+        const fdpStart = nextRosterDayStartDt
+        const fdpEnd = addHoursToDate(fdpStart, maxRecoveryRestGapHours)
+        const lastRosterDutyEndDt =
+          addRosterSegment(fdpStart, fdpEnd, "ROSTER DAY", "Day-1 05:30 through Day-5 FDP") || fdpEnd
+        const rosterDutyHours =
+          (lastRosterDutyEndDt.getTime() - fdpStart.getTime()) / (60 * 60 * 1000)
+        const reachedRecoveryLimit = rosterDutyHours >= maxRecoveryRestGapHours - 1
+        if (!reachedRecoveryLimit) {
+          break
+        }
 
-        const mergedRestStart = fdpEnd
-        const mergedRestEnd = addHoursToDate(mergedRestStart, 58)
-        addRosterSegment(mergedRestStart, mergedRestEnd, "REST", "Merged REST: 58 hours from Day-5 FDP end")
+        const mergedRestStart = lastRosterDutyEndDt
+        const restPeriodHours = Number(crewRosterGeneratorForm.restPeriod || "58") || 58
+        const mergedRestEnd = addHoursToDate(mergedRestStart, restPeriodHours)
+        addRosterSegment(
+          mergedRestStart,
+          mergedRestEnd,
+          "REST",
+          `Merged REST: ${restPeriodHours} hours from last roster duty end`,
+        )
 
-        cursor = addDaysToYmd(cursor, 7)
+        nextRosterDayStartDt = mergedRestEnd
+        cycleGuard += 1
       }
     })
     const targetCrewCodes = new Set(targetCrews.map((c) => c.crewCode))
@@ -6313,16 +6917,674 @@ export default function Page() {
     window.alert(`Generated ${newRosterRows.length} roster bar segment(s).`)
   }
 
+  const clearCrewRosterBars = () => {
+    const fromDate = (crewRosterGeneratorForm.fromDate || "").trim()
+    const toDate = (crewRosterGeneratorForm.toDate || "").trim()
+    if (!fromDate || !toDate || toDate < fromDate) {
+      window.alert("Select a valid roster period to clear.")
+      return
+    }
+    const selectedCrewCode = normalizeCrewCode(crewRosterGeneratorForm.crewCode || "")
+    const crewLabel = selectedCrewCode || "all selected crew"
+    if (!window.confirm(`Clear generated roster bars for ${crewLabel} from ${formatYmdToDdMmYy(fromDate)} to ${formatYmdToDdMmYy(toDate)}?`)) {
+      return
+    }
+    let removedCount = 0
+    setStore((prev) => {
+      const nextCrewLeavePlanner = prev.crewLeavePlanner.filter((row) => {
+        if ((row.recordType || "").trim().toLowerCase() !== "generatedroster") return true
+        const crewCode = normalizeCrewCode(row.crewCode || "")
+        if (selectedCrewCode && crewCode !== selectedCrewCode) return true
+        const start = (row.startDate || "").trim()
+        const end = (row.endDate || start).trim()
+        if (!start || !end) return true
+        const overlapsWindow = overlapDaysInclusive(start, end, fromDate, toDate) > 0
+        if (overlapsWindow) removedCount += 1
+        return !overlapsWindow
+      })
+      return { ...prev, crewLeavePlanner: nextCrewLeavePlanner }
+    })
+    setCrewLeavePlannerTab("timeline")
+    window.alert(`Cleared ${removedCount} roster bar(s).`)
+  }
+
+  const normalizeCrewRosterExcelDate = (value: unknown): string => {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return toYmd(value)
+    if (typeof value === "number" && value > 20000 && value < 80000) {
+      const date = new Date(1899, 11, 30)
+      date.setDate(date.getDate() + Math.floor(value))
+      return toYmd(date)
+    }
+    return normalizeImportDate(String(value || ""))
+  }
+
+  const normalizeImportedCrewDutyCode = (value: unknown): string => {
+    const raw = String(value || "").trim().toUpperCase().replace(/\s+/g, "")
+    if (raw === "O" || raw === "OFF" || raw === "REST") return "OF"
+    if (raw === "PL" || raw === "AL" || raw === "NP" || raw === "LEAVE") return "AL"
+    return raw
+  }
+
+  const importCrewRosterExcel = async (file: File) => {
+    try {
+      await loadSheetJs()
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Failed to load Excel parser.")
+      return
+    }
+    const XLSX = (window as SheetJSWindow).XLSX
+    if (!XLSX) {
+      window.alert("Excel parser is not available.")
+      return
+    }
+
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true })
+    const dutyCodeDefaults: Record<string, { name: string; dutyType: string; startTime: string; endTime: string }> = {
+      FD: { name: "Flight Duty", dutyType: "Flight Duty", startTime: "00:00", endTime: "23:59" },
+      GD: { name: "Ground Duty", dutyType: "Ground Duty", startTime: "00:00", endTime: "23:59" },
+      OF: { name: "Off / Release", dutyType: "Release - OF", startTime: "19:30", endTime: "23:59" },
+    }
+    const existingDutyCodeMap = new Map<string, Entry>()
+    crewDutyCodeConfigs.forEach((row) => {
+      const code = (row.code || "").trim().toUpperCase()
+      if (code) existingDutyCodeMap.set(code, row)
+    })
+    const allowedDutyCodes = new Set(Array.from(existingDutyCodeMap.keys()))
+    const crewDbByCode = new Map<string, Entry>()
+    store.crewDataBase.forEach((row) => {
+      const code = normalizeCrewCode(row.crewCode || "")
+      if (code) crewDbByCode.set(code, row)
+    })
+    const generatedBlocksByCrew = new Map<string, Entry[]>()
+    crewGeneratedBlocks.forEach((row) => {
+      const code = normalizeCrewCode(row.crewCode || "")
+      if (!code) return
+      const list = generatedBlocksByCrew.get(code) || []
+      list.push(row)
+      generatedBlocksByCrew.set(code, list)
+    })
+    const importedRows: Entry[] = []
+    const importedActualLeaveRows: Entry[] = []
+    const affectedCrewCodes = new Set<string>()
+    const importedDates = new Set<string>()
+    const skippedCodes = new Map<string, number>()
+    const skippedOutsideRosterDay = new Map<string, number>()
+    const restPeriodHours = Number(crewRosterGeneratorForm.restPeriod || "58") || 58
+    const maxRecoveryRestGapHours = Number(crewRosterGeneratorForm.maxRecoveryRestGap || "110") || 110
+
+    type ImportedRosterCell = {
+      crewCode: string
+      crewName: string
+      crewType: string
+      sheetName: string
+      ymd: string
+      code: string
+      dutyType: string
+      rosterBarMap: "REST" | "ROSTER DAY"
+      startTime: string
+      endTime: string
+      color: string
+      startDt: Date
+      endDt: Date
+    }
+
+    type ImportedActualLeaveCell = {
+      crewCode: string
+      crewName: string
+      crewType: string
+      sheetName: string
+      ymd: string
+    }
+
+    type ImportedBaseSegment = {
+      crewCode: string
+      crewName: string
+      crewType: string
+      sheetName: string
+      rosterType: "REST" | "ROSTER DAY"
+      startDt: Date
+      endDt: Date
+      dutyCode?: string
+      dutyType?: string
+      dutyColor?: string
+      note: string
+    }
+
+    const findGeneratedBlockForDay = (crewCode: string, ymd: string) =>
+      (generatedBlocksByCrew.get(crewCode) || []).find((block) => {
+        const start = (block.startDate || "").trim()
+        const end = (block.endDate || "").trim()
+        return start && end && ymd >= start && ymd <= end
+      })
+
+    const pushImportedBaseSegment = (segment: ImportedBaseSegment) => {
+      if (segment.endDt <= segment.startDt) return
+      const startMeta = formatDateToYmdHm(segment.startDt)
+      const endMeta = formatDateToYmdHm(segment.endDt)
+      const matchingBlock = findGeneratedBlockForDay(segment.crewCode, startMeta.ymd)
+      affectedCrewCodes.add(segment.crewCode)
+      importedDates.add(startMeta.ymd)
+      importedDates.add(endMeta.ymd)
+      importedRows.push({
+        id: `grb_imp_base_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+        recordType: "generatedRoster",
+        crewCode: segment.crewCode,
+        crewName: segment.crewName,
+        crewType: segment.crewType,
+        cycleNumber: matchingBlock?.cycleNumber || "",
+        startDate: startMeta.ymd,
+        endDate: endMeta.ymd,
+        startTime: startMeta.hm,
+        endTime: endMeta.hm,
+        rosterType: segment.rosterType,
+        dutyCode: segment.dutyCode || "",
+        dutyType: segment.dutyType || "",
+        dutyColor: segment.dutyColor || "",
+        sourceBlockId: matchingBlock?.id || "",
+        maxRecoveryRestGap: String(maxRecoveryRestGapHours),
+        restPeriod: `${restPeriodHours}h`,
+        localNight: crewRosterGeneratorForm.localNight,
+        localDay: crewRosterGeneratorForm.localDay,
+        maxTimeBetweenRecoveryRestHours: String(maxRecoveryRestGapHours),
+        fdpPattern: segment.note,
+      })
+    }
+
+    workbook.SheetNames.forEach((sheetName) => {
+      const ws = workbook.Sheets[sheetName]
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" })
+      if (rows.length < 3) return
+      const dateRow = rows[0] || []
+      const dateColumns = dateRow
+        .map((value, idx) => ({ idx, ymd: normalizeCrewRosterExcelDate(value) }))
+        .filter((col) => col.idx >= 3 && col.ymd)
+      if (dateColumns.length === 0) return
+
+      rows.slice(2).forEach((rowValues) => {
+        const crewCode = normalizeCrewCode(String(rowValues[2] || ""))
+        if (!crewCode) return
+        const crewDb = crewDbByCode.get(crewCode)
+        const crewName = (crewDb?.crewName || String(rowValues[0] || "")).trim()
+        const crewType = (crewDb?.crewType || sheetName || "").trim()
+        const dutyCells: ImportedRosterCell[] = []
+        const actualLeaveCells: ImportedActualLeaveCell[] = []
+
+        dateColumns.forEach(({ idx, ymd }) => {
+          const code = normalizeImportedCrewDutyCode(rowValues[idx])
+          if (!code) return
+          if (code === "AL") {
+            actualLeaveCells.push({ crewCode, crewName, crewType, sheetName, ymd })
+            return
+          }
+          if (!allowedDutyCodes.has(code)) {
+            skippedCodes.set(code, (skippedCodes.get(code) || 0) + 1)
+            return
+          }
+          const configured = existingDutyCodeMap.get(code)
+          if (!configured) return
+          const fallback = dutyCodeDefaults[code] || {
+            name: configured.dutyName || code,
+            dutyType: configured.dutyType || "Ground Duty",
+            startTime: configured.defaultStartTime || "00:00",
+            endTime: configured.defaultEndTime || "23:59",
+          }
+          const dutyType = configured?.dutyType || fallback.dutyType
+          const rosterBarMap =
+            crewDutyTypeMap.get(dutyType.trim().toLowerCase()) ||
+            configured?.rosterBarMap ||
+            getCrewDutyRosterBarMap(dutyType)
+          const startTime =
+            rosterBarMap === "REST" && (!configured?.defaultStartTime || configured.defaultStartTime === "00:00")
+              ? fallback.startTime
+              : configured?.defaultStartTime || fallback.startTime
+          const endTime = configured?.defaultEndTime || fallback.endTime
+          const dutyStartDt = parseLocalDateTime(ymd, startTime || "00:00")
+          const dutyEndDt = parseLocalDateTime(
+            startTime && endTime && endTime <= startTime && endTime !== "23:59" ? addDaysToYmd(ymd, 1) : ymd,
+            endTime || "23:59",
+          )
+          dutyCells.push({
+            crewCode,
+            crewName,
+            crewType,
+            sheetName,
+            ymd,
+            code,
+            dutyType,
+            rosterBarMap: rosterBarMap === "REST" ? "REST" : "ROSTER DAY",
+            startTime: startTime || "00:00",
+            endTime: endTime || "23:59",
+            color: configured.color || getDefaultDutyCodeColor(code),
+            startDt: dutyStartDt,
+            endDt: dutyEndDt,
+          })
+        })
+
+        if (actualLeaveCells.length > 0) {
+          const sortedLeaveCells = actualLeaveCells.sort((a, b) => a.ymd.localeCompare(b.ymd))
+          let segmentStart = sortedLeaveCells[0].ymd
+          let segmentEnd = sortedLeaveCells[0].ymd
+          const pushActualLeaveSegment = (startDate: string, endDate: string) => {
+            const matchingBlock = findGeneratedBlockForDay(crewCode, startDate)
+            affectedCrewCodes.add(crewCode)
+            importedDates.add(startDate)
+            importedDates.add(endDate)
+            importedActualLeaveRows.push({
+              id: `als_imp_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+              createdAt: new Date().toISOString(),
+              recordType: "actualLeaveSegment",
+              crewCode,
+              crewName,
+              crewType,
+              cycleNumber: matchingBlock?.cycleNumber || "",
+              startDate,
+              endDate,
+              plannedDays: String(getDateRangeInclusive(startDate, endDate).length),
+              sourceBlockId: matchingBlock?.id || "",
+              overrideConflicts: "Yes",
+              importedCode: "PL",
+              fdpPattern: `Imported ${sheetName} PL as AL`,
+            })
+          }
+          sortedLeaveCells.slice(1).forEach((cell) => {
+            if (cell.ymd === addDaysToYmd(segmentEnd, 1)) {
+              segmentEnd = cell.ymd
+              return
+            }
+            pushActualLeaveSegment(segmentStart, segmentEnd)
+            segmentStart = cell.ymd
+            segmentEnd = cell.ymd
+          })
+          pushActualLeaveSegment(segmentStart, segmentEnd)
+        }
+
+        if (dutyCells.length === 0) return
+
+        dutyCells.sort((a, b) => a.startDt.getTime() - b.startDt.getTime())
+        const restSegments: ImportedBaseSegment[] = []
+        const rosterDayCells = dutyCells.filter((cell) => cell.rosterBarMap !== "REST")
+        const restCells = dutyCells.filter((cell) => cell.rosterBarMap === "REST")
+
+        restCells.forEach((restCell) => {
+          const previousCell = dutyCells
+            .filter((cell) => cell.startDt < restCell.startDt)
+            .sort((a, b) => b.startDt.getTime() - a.startDt.getTime())[0]
+          if (previousCell?.rosterBarMap === "REST") return
+          const previousDutyCell = dutyCells
+            .filter((cell) => cell.rosterBarMap !== "REST" && cell.startDt < restCell.startDt)
+            .sort((a, b) => b.startDt.getTime() - a.startDt.getTime())[0]
+          const restStartDt = previousDutyCell ? previousDutyCell.endDt : restCell.startDt
+          const restEndDt = addHoursToDate(restStartDt, restPeriodHours)
+          restSegments.push({
+            crewCode,
+            crewName,
+            crewType,
+            sheetName,
+            rosterType: "REST",
+            startDt: restStartDt,
+            endDt: restEndDt,
+            dutyCode: restCell.code,
+            dutyType: restCell.dutyType,
+            dutyColor: restCell.color,
+            note: `Imported ${sheetName} ${restCell.code}: ${restPeriodHours}h recovery rest`,
+          })
+        })
+
+        restSegments.sort((a, b) => a.startDt.getTime() - b.startDt.getTime())
+        restSegments.forEach(pushImportedBaseSegment)
+
+        const rosterDaySegments: ImportedBaseSegment[] = []
+        const pushRosterDaySegment = (startDt: Date, requestedEndDt: Date, note: string) => {
+          const maxEndDt = addHoursToDate(startDt, maxRecoveryRestGapHours)
+          const endDt = requestedEndDt < maxEndDt ? requestedEndDt : maxEndDt
+          if (endDt <= startDt) return
+          rosterDaySegments.push({
+            crewCode,
+            crewName,
+            crewType,
+            sheetName,
+            rosterType: "ROSTER DAY",
+            startDt,
+            endDt,
+            note,
+          })
+        }
+
+        if (restSegments.length > 0) {
+          const firstRest = restSegments[0]
+          const dutiesBeforeFirstRest = rosterDayCells.filter((cell) => cell.startDt < firstRest.startDt)
+          if (dutiesBeforeFirstRest.length > 0) {
+            pushRosterDaySegment(
+              dutiesBeforeFirstRest[0].startDt,
+              firstRest.startDt,
+              `Imported ${sheetName}: duty period until ${firstRest.dutyCode || "OF"}`,
+            )
+          }
+          restSegments.forEach((restSegment, index) => {
+            const nextRest = restSegments[index + 1]
+            if (nextRest) {
+              pushRosterDaySegment(
+                restSegment.endDt,
+                nextRest.startDt,
+                `Imported ${sheetName}: roster day between recovery rest periods`,
+              )
+              return
+            }
+            const dutiesAfterRest = rosterDayCells.filter((cell) => cell.endDt > restSegment.endDt)
+            if (dutiesAfterRest.length > 0) {
+              const lastDutyEnd = dutiesAfterRest.reduce(
+                (latest, cell) => (cell.endDt > latest ? cell.endDt : latest),
+                dutiesAfterRest[0].endDt,
+              )
+              pushRosterDaySegment(
+                restSegment.endDt,
+                lastDutyEnd,
+                `Imported ${sheetName}: duty period after ${restSegment.dutyCode || "OF"}`,
+              )
+            }
+          })
+        } else if (rosterDayCells.length > 0) {
+          const firstDutyStart = rosterDayCells[0].startDt
+          const lastDutyEnd = rosterDayCells.reduce(
+            (latest, cell) => (cell.endDt > latest ? cell.endDt : latest),
+            rosterDayCells[0].endDt,
+          )
+          pushRosterDaySegment(firstDutyStart, lastDutyEnd, `Imported ${sheetName}: roster day from duty codes`)
+        }
+
+        rosterDaySegments
+          .sort((a, b) => a.startDt.getTime() - b.startDt.getTime())
+          .forEach(pushImportedBaseSegment)
+
+        rosterDayCells.forEach((cell) => {
+          const matchingRosterDay = rosterDaySegments.find(
+            (segment) => cell.startDt < segment.endDt && cell.endDt > segment.startDt,
+          )
+          if (!matchingRosterDay) {
+            skippedOutsideRosterDay.set(cell.code, (skippedOutsideRosterDay.get(cell.code) || 0) + 1)
+            return
+          }
+          const clippedStartDt = cell.startDt > matchingRosterDay.startDt ? cell.startDt : matchingRosterDay.startDt
+          const clippedEndDt = cell.endDt < matchingRosterDay.endDt ? cell.endDt : matchingRosterDay.endDt
+          if (clippedEndDt <= clippedStartDt) {
+            skippedOutsideRosterDay.set(cell.code, (skippedOutsideRosterDay.get(cell.code) || 0) + 1)
+            return
+          }
+          const startMeta = formatDateToYmdHm(clippedStartDt)
+          const endMeta = formatDateToYmdHm(clippedEndDt)
+          const matchingBlock = findGeneratedBlockForDay(crewCode, startMeta.ymd)
+          affectedCrewCodes.add(crewCode)
+          importedDates.add(startMeta.ymd)
+          importedDates.add(endMeta.ymd)
+          importedRows.push({
+            id: `grb_imp_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+            recordType: "generatedRoster",
+            crewCode,
+            crewName,
+            crewType,
+            cycleNumber: matchingBlock?.cycleNumber || "",
+            startDate: startMeta.ymd,
+            endDate: endMeta.ymd,
+            startTime: startMeta.hm,
+            endTime: endMeta.hm,
+            rosterType: "DUTY CODE",
+            dutyCode: cell.code,
+            dutyType: cell.dutyType,
+            dutyColor: cell.color,
+            sourceBlockId: matchingBlock?.id || "",
+            fdpPattern: `Imported ${cell.sheetName} ${cell.code}`,
+          })
+        })
+      })
+    })
+
+    const allImportedRows = [...importedRows, ...importedActualLeaveRows]
+
+    if (allImportedRows.length === 0) {
+      const outsideRosterText = Array.from(skippedOutsideRosterDay.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([code, count]) => `${code}: ${count}`)
+        .join(", ")
+      window.alert(
+        outsideRosterText
+          ? `No duty codes were imported because they did not fit inside imported Roster Day periods.\nSkipped: ${outsideRosterText}`
+          : "No matching duty code or PL/AL/NP cells found in the selected Excel file. Check that the codes exist in Duty Code Manager.",
+      )
+      return
+    }
+
+    const sortedDates = Array.from(importedDates).sort()
+    const fromDate = sortedDates[0]
+    const toDate = sortedDates[sortedDates.length - 1]
+    const hasImportedRosterRows = importedRows.length > 0
+    setStore((prev) => {
+      const kept = prev.crewLeavePlanner.filter((row) => {
+        const recordType = (row.recordType || "").trim().toLowerCase()
+        const crewCode = normalizeCrewCode(row.crewCode || "")
+        if (!affectedCrewCodes.has(crewCode)) return true
+        const start = (row.startDate || "").trim()
+        const end = (row.endDate || start).trim()
+        const overlapsImport = Boolean(start && end && overlapDaysInclusive(start, end, fromDate, toDate) > 0)
+        if (!overlapsImport) return true
+        if (recordType === "generatedroster") {
+          if (hasImportedRosterRows) return false
+          return (row.rosterType || "").trim().toUpperCase() !== "DUTY CODE"
+        }
+        if (recordType === "actualleavesegment") return false
+        return true
+      })
+      return {
+        ...prev,
+        crewLeavePlanner: [...allImportedRows, ...kept],
+      }
+    })
+    setCrewLeaveTimelineFilter({ fromDate, toDate })
+    setCrewLeavePlannerTab("timeline")
+
+    const skippedText = Array.from(skippedCodes.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([code, count]) => `${code || "(blank)"}: ${count}`)
+      .join(", ")
+    const outsideRosterText = Array.from(skippedOutsideRosterDay.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([code, count]) => `${code}: ${count}`)
+      .join(", ")
+    window.alert(
+      `Crew roster import complete.\nImported roster cells: ${importedRows.length}\nImported PL/AL/NP leave segment(s): ${importedActualLeaveRows.length}\nCrew affected: ${affectedCrewCodes.size}\nPeriod: ${formatYmdToDdMmYy(
+        fromDate,
+      )} - ${formatYmdToDdMmYy(toDate)}${
+        skippedText ? `\nSkipped other codes: ${skippedText}` : ""
+      }${
+        outsideRosterText
+          ? `\nSkipped outside Roster Day / overlapping Rest: ${outsideRosterText}`
+          : ""
+      }`,
+    )
+  }
+
   const openRosterGeneratorForCrew = (crewCodeValue: string, fromDateValue?: string) => {
     const crewCode = normalizeCrewCode(crewCodeValue || "")
     const fromDate = (fromDateValue || "").trim()
+    const range = getSixMonthRangeFromDate(fromDate || undefined)
     setCrewRosterGeneratorForm((prev) => ({
       ...prev,
       crewCode,
-      fromDate: fromDate || prev.fromDate,
+      fromDate: fromDate || range.fromDate,
+      toDate: range.toDate,
     }))
     setCrewRosterGeneratorTab("setup")
     setIsCrewRosterGeneratorOpen(true)
+  }
+
+  const openActualLeaveRosterDetails = (rb: Entry) => {
+    const crewCode = normalizeCrewCode(rb.crewCode || "")
+    const cycleNumber = (rb.cycleNumber || "").trim()
+    const sourceBlockId = (rb.sourceBlockId || "").trim()
+    const matchingLeaveBlock =
+      (sourceBlockId
+        ? computedCrewGeneratedBlocks.find((row) => (row.id || "").trim() === sourceBlockId)
+        : undefined) ||
+      (cycleNumber
+        ? computedCrewGeneratedBlocks.find(
+            (row) =>
+              normalizeCrewCode(row.crewCode || "") === crewCode &&
+              (row.blockType || "").trim().toLowerCase() === "leave" &&
+              (row.cycleNumber || "").trim() === cycleNumber,
+          )
+        : undefined) ||
+      computedCrewGeneratedBlocks.find((row) => {
+        if (normalizeCrewCode(row.crewCode || "") !== crewCode) return false
+        if ((row.blockType || "").trim().toLowerCase() !== "leave") return false
+        const start = (row.startDate || "").trim()
+        const end = (row.endDate || start).trim()
+        const alStart = (rb.startDate || "").trim()
+        const alEnd = (rb.endDate || alStart).trim()
+        return Boolean(start && end && alStart && alEnd && overlapDaysInclusive(start, end, alStart, alEnd) > 0)
+      })
+    const nextCycle = cycleNumber || (matchingLeaveBlock?.cycleNumber || "").trim()
+    setLeaveDetailModal({
+      open: true,
+      blockId: matchingLeaveBlock?.id || "",
+      actualLeaveSegmentId: (rb.id || "").trim(),
+      crewCode,
+      crewName: rb.crewName || matchingLeaveBlock?.crewName || "",
+      cycleNumber: nextCycle,
+      leaveStart: matchingLeaveBlock?.startDate || (rb.startDate || ""),
+      leaveEnd: matchingLeaveBlock?.endDate || (rb.endDate || ""),
+      policyName: matchingLeaveBlock?.policyName || "",
+    })
+    setLeaveDetailSelectedCycle(nextCycle)
+    setLeaveDetailDraft({
+      start: (rb.startDate || "").trim(),
+      end: (rb.endDate || rb.startDate || "").trim(),
+    })
+  }
+
+  const openRosterBarDetails = (
+    rb: Entry,
+    labelType: string,
+    selectedStartDt?: Date,
+    selectedEndDt?: Date,
+  ) => {
+    const start = (rb.startDate || "").trim()
+    const end = (rb.endDate || "").trim()
+    const startHm = (rb.startTime || "00:00").trim()
+    const endHm = (rb.endTime || "23:59").trim()
+    const barStartDt = parseLocalDateTime(start, startHm || "00:00")
+    const barEndDt = parseLocalDateTime(end, endHm || "23:59")
+    const detailStartDt = selectedStartDt && selectedStartDt > barStartDt ? selectedStartDt : barStartDt
+    const detailEndDt = selectedEndDt && selectedEndDt < barEndDt ? selectedEndDt : barEndDt
+    if (detailEndDt <= detailStartDt) return
+    const startMeta = formatDateToYmdHm(detailStartDt)
+    const endMeta = formatDateToYmdHm(detailEndDt)
+    const durationHours = (detailEndDt.getTime() - detailStartDt.getTime()) / (60 * 60 * 1000)
+    const crewCode = normalizeCrewCode(rb.crewCode || "")
+    const dutyAssignments = crewGeneratedRosterBars
+      .filter((row) => normalizeCrewCode(row.crewCode || "") === crewCode)
+      .filter((row) => (row.rosterType || "").trim().toUpperCase() === "DUTY CODE")
+      .map((row) => {
+        const dutyStart = parseLocalDateTime(
+          (row.startDate || "").trim(),
+          (row.startTime || "00:00").trim() || "00:00",
+        )
+        const dutyEnd = parseLocalDateTime(
+          (row.endDate || row.startDate || "").trim(),
+          (row.endTime || "23:59").trim() || "23:59",
+        )
+        return { row, dutyStart, dutyEnd }
+      })
+      .filter(({ dutyStart, dutyEnd }) => dutyStart < detailEndDt && dutyEnd > detailStartDt)
+      .sort((a, b) => a.dutyStart.getTime() - b.dutyStart.getTime())
+      .map(({ row, dutyStart, dutyEnd }) => {
+        const dutyStartMeta = formatDateToYmdHm(dutyStart)
+        const dutyEndMeta = formatDateToYmdHm(dutyEnd)
+        return {
+          id: row.id,
+          code: (row.dutyCode || "").trim().toUpperCase(),
+          dutyType: row.dutyType || "",
+          startDate: dutyStartMeta.ymd,
+          startTime: dutyStartMeta.hm,
+          endDate: dutyEndMeta.ymd,
+          endTime: dutyEndMeta.hm,
+        }
+      })
+    setRosterBarDetailModal({
+      open: true,
+      crewCode,
+      crewName: rb.crewName || "",
+      rosterType: rb.dutyCode ? `${String(rb.dutyCode).trim().toUpperCase()} - ${labelType}` : labelType,
+      startDate: startMeta.ymd,
+      startTime: startMeta.hm,
+      endDate: endMeta.ymd,
+      endTime: endMeta.hm,
+      durationHours: durationHours.toFixed(1),
+      daySegments: buildRosterDaySegments(detailStartDt, detailEndDt, labelType),
+      dutyAssignments,
+    })
+  }
+
+  const updateRosterDetailDutyAssignment = (
+    index: number,
+    field: "startDate" | "startTime" | "endDate" | "endTime",
+    value: string,
+  ) => {
+    setRosterBarDetailModal((prev) => {
+      const dutyAssignments = prev.dutyAssignments.map((row) => ({ ...row }))
+      if (!dutyAssignments[index]) return prev
+      dutyAssignments[index][field] = value
+      if ((field === "endDate" || field === "endTime") && dutyAssignments[index + 1]) {
+        dutyAssignments[index + 1].startDate = dutyAssignments[index].endDate
+        dutyAssignments[index + 1].startTime = dutyAssignments[index].endTime
+      }
+      return { ...prev, dutyAssignments }
+    })
+  }
+
+  const saveRosterDetailDutyAssignments = () => {
+    if (!rosterBarDetailModal.open || rosterBarDetailModal.dutyAssignments.length === 0) return
+    const rows = rosterBarDetailModal.dutyAssignments
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i]
+      if (!row.startDate || !row.startTime || !row.endDate || !row.endTime) {
+        window.alert("Start and End date/time are required for all duty codes.")
+        return
+      }
+      const startDt = parseLocalDateTime(row.startDate, row.startTime)
+      const endDt = parseLocalDateTime(row.endDate, row.endTime)
+      if (endDt <= startDt) {
+        window.alert(`Duty code ${row.code || i + 1} end time must be after start time.`)
+        return
+      }
+      const nextRow = rows[i + 1]
+      if (nextRow) {
+        const nextStartDt = parseLocalDateTime(nextRow.startDate, nextRow.startTime)
+        if (nextStartDt < endDt) {
+          window.alert(`Duty code ${nextRow.code || i + 2} starts before the previous duty ends.`)
+          return
+        }
+      }
+    }
+    const updatesById = new Map(rows.map((row) => [row.id, row]))
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.map((row) => {
+        const update = updatesById.get(row.id)
+        if (!update) return row
+        return {
+          ...row,
+          startDate: update.startDate,
+          startTime: update.startTime,
+          endDate: update.endDate,
+          endTime: update.endTime,
+        }
+      }),
+    }))
+    window.alert("Duty code timing updated.")
   }
 
   const crewLeaveBalances = useMemo(() => {
@@ -6402,12 +7664,237 @@ export default function Page() {
     setIsFormOpen(true)
   }
 
+  const findActualLeaveDropConflicts = (params: {
+    crewCode: string
+    startDate: string
+    endDate: string
+    sourceBlockId?: string
+  }) => {
+    const crewCode = normalizeCrewCode(params.crewCode || "")
+    const startDate = (params.startDate || "").trim()
+    const endDate = (params.endDate || "").trim()
+    if (!crewCode || !startDate || !endDate) return []
+    const generatedConflicts = crewGeneratedRosterBars
+      .filter((row) => normalizeCrewCode(row.crewCode || "") === crewCode)
+      .filter((row) => {
+        const start = (row.startDate || "").trim()
+        const end = (row.endDate || start).trim()
+        return Boolean(start && end && overlapDaysInclusive(startDate, endDate, start, end) > 0)
+      })
+      .map((row) => ({
+        type: (row.rosterType || "Roster").trim().toUpperCase(),
+        code: (row.dutyCode || "").trim().toUpperCase(),
+        start: (row.startDate || "").trim(),
+        end: (row.endDate || row.startDate || "").trim(),
+        startTime: (row.startTime || "00:00").trim(),
+        endTime: (row.endTime || "23:59").trim(),
+      }))
+    const actualLeaveConflicts = store.crewLeavePlanner
+      .filter((row) => (row.recordType || "").trim().toLowerCase() === "actualleavesegment")
+      .filter((row) => normalizeCrewCode(row.crewCode || "") === crewCode)
+      .filter((row) => (row.sourceBlockId || "").trim() !== (params.sourceBlockId || "").trim())
+      .filter((row) => {
+        const start = (row.startDate || "").trim()
+        const end = (row.endDate || start).trim()
+        return Boolean(start && end && overlapDaysInclusive(startDate, endDate, start, end) > 0)
+      })
+      .map((row) => ({
+        type: "ACTUAL LEAVE",
+        code: "",
+        start: (row.startDate || "").trim(),
+        end: (row.endDate || row.startDate || "").trim(),
+        startTime: "00:00",
+        endTime: "23:59",
+      }))
+    return [...generatedConflicts, ...actualLeaveConflicts]
+  }
+
+  const openActualLeaveDropModal = (params: {
+    block: Entry
+    startDate: string
+    endDate: string
+  }) => {
+    const crewCode = normalizeCrewCode(params.block.crewCode || "")
+    const sourceBlockId = (params.block.id || "").trim()
+    const startDate = (params.startDate || "").trim()
+    const endDate = (params.endDate || "").trim()
+    if (!crewCode || !startDate || !endDate || endDate < startDate) return
+    setPendingActualLeaveDrop({
+      open: true,
+      sourceBlockId,
+      crewCode,
+      crewName: params.block.crewName || "",
+      cycleNumber: (params.block.cycleNumber || "").trim(),
+      startDate,
+      endDate,
+      plannedDays: getDateRangeInclusive(startDate, endDate).length,
+      conflicts: findActualLeaveDropConflicts({ crewCode, startDate, endDate, sourceBlockId }),
+      override: false,
+    })
+  }
+
+  const confirmActualLeaveDrop = () => {
+    if (!pendingActualLeaveDrop.open) return
+    if (!pendingActualLeaveDrop.startDate || !pendingActualLeaveDrop.endDate) {
+      window.alert("Actual Leave Start and End are required.")
+      return
+    }
+    if (pendingActualLeaveDrop.endDate < pendingActualLeaveDrop.startDate) {
+      window.alert("Actual Leave End must be after or equal to Start.")
+      return
+    }
+    if (pendingActualLeaveDrop.conflicts.length > 0 && !pendingActualLeaveDrop.override) {
+      window.alert("Conflict found. Tick Override to save this Actual Leave.")
+      return
+    }
+    addActualLeaveSegment({
+      crewCode: pendingActualLeaveDrop.crewCode,
+      crewName: pendingActualLeaveDrop.crewName,
+      cycleNumber: pendingActualLeaveDrop.cycleNumber,
+      startDate: pendingActualLeaveDrop.startDate,
+      endDate: pendingActualLeaveDrop.endDate,
+      sourceBlockId: pendingActualLeaveDrop.sourceBlockId,
+      overrideConflicts: pendingActualLeaveDrop.override ? "Yes" : "No",
+      clearConflictingDutyCodes: pendingActualLeaveDrop.override,
+    })
+    setPendingActualLeaveDrop((p) => ({ ...p, open: false }))
+  }
+
+  const openCrewDutyDropModal = (params: {
+    code: string
+    crewCode: string
+    crewName: string
+    date: string
+  }) => {
+    const code = (params.code || "").trim().toUpperCase()
+    const crewCode = normalizeCrewCode(params.crewCode || "")
+    const date = (params.date || "").trim()
+    if (!code || !crewCode || !date) return
+    const config = crewDutyCodeConfigs.find((row) => (row.code || "").trim().toUpperCase() === code)
+    if (!config) {
+      window.alert(`Duty code ${code} not found in Duty Code Manager.`)
+      return
+    }
+    const dutyType = (config.dutyType || "").trim()
+    const rosterBarMap =
+      crewDutyTypeMap.get(dutyType.toLowerCase()) ||
+      config.rosterBarMap ||
+      getCrewDutyRosterBarMap(dutyType)
+    const defaultStart =
+      rosterBarMap === "REST" && (!config.defaultStartTime || config.defaultStartTime === "00:00")
+        ? "19:30"
+        : (config.defaultStartTime || "00:00").trim()
+    const defaultEnd = (config.defaultEndTime || "23:59").trim()
+    const startDt = parseLocalDateTime(date, defaultStart)
+    const endDt =
+      rosterBarMap === "REST"
+        ? addHoursToDate(startDt, Number(crewRosterGeneratorForm.restPeriod || "58") || 58)
+        : parseLocalDateTime(defaultEnd <= defaultStart && defaultEnd !== "23:59" ? addDaysToYmd(date, 1) : date, defaultEnd)
+    const startMeta = formatDateToYmdHm(startDt)
+    const endMeta = formatDateToYmdHm(endDt)
+    const conflicts = crewGeneratedRosterBars
+      .filter((row) => normalizeCrewCode(row.crewCode || "") === crewCode)
+      .filter((row) => {
+        const type = (row.rosterType || "").trim().toUpperCase()
+        if (type !== "DUTY CODE" && type !== "REST") return false
+        const rowStart = parseLocalDateTime((row.startDate || "").trim(), (row.startTime || "00:00").trim())
+        const rowEnd = parseLocalDateTime((row.endDate || row.startDate || "").trim(), (row.endTime || "23:59").trim())
+        return startDt < rowEnd && endDt > rowStart
+      })
+      .map((row) => ({
+        id: row.id,
+        type: (row.rosterType || "").trim().toUpperCase(),
+        code: (row.dutyCode || "").trim().toUpperCase(),
+        start: (row.startDate || "").trim(),
+        end: (row.endDate || row.startDate || "").trim(),
+        startTime: (row.startTime || "00:00").trim(),
+        endTime: (row.endTime || "23:59").trim(),
+      }))
+    setPendingCrewDutyDrop({
+      open: true,
+      crewCode,
+      crewName: params.crewName || "",
+      code,
+      dutyType,
+      rosterBarMap: rosterBarMap === "REST" ? "REST" : "ROSTER DAY",
+      startDate: startMeta.ymd,
+      startTime: startMeta.hm,
+      endDate: endMeta.ymd,
+      endTime: endMeta.hm,
+      conflicts,
+      mode: conflicts.length ? "after" : "override",
+    })
+  }
+
+  const confirmCrewDutyDrop = () => {
+    if (!pendingCrewDutyDrop.open) return
+    const config = crewDutyCodeConfigs.find(
+      (row) => (row.code || "").trim().toUpperCase() === pendingCrewDutyDrop.code,
+    )
+    if (!config) return
+    let startDt = parseLocalDateTime(pendingCrewDutyDrop.startDate, pendingCrewDutyDrop.startTime || "00:00")
+    if (pendingCrewDutyDrop.mode === "after" && pendingCrewDutyDrop.conflicts.length > 0) {
+      const latestEnd = pendingCrewDutyDrop.conflicts
+        .map((c) => parseLocalDateTime(c.end, c.endTime || "23:59"))
+        .sort((a, b) => b.getTime() - a.getTime())[0]
+      if (latestEnd) startDt = latestEnd
+    }
+    const endDt =
+      pendingCrewDutyDrop.rosterBarMap === "REST"
+        ? addHoursToDate(startDt, Number(crewRosterGeneratorForm.restPeriod || "58") || 58)
+        : parseLocalDateTime(
+            pendingCrewDutyDrop.endTime <= pendingCrewDutyDrop.startTime &&
+              pendingCrewDutyDrop.endTime !== "23:59"
+              ? addDaysToYmd(formatDateToYmdHm(startDt).ymd, 1)
+              : formatDateToYmdHm(startDt).ymd,
+            pendingCrewDutyDrop.endTime || "23:59",
+          )
+    if (endDt <= startDt) {
+      window.alert("Duty end must be after start.")
+      return
+    }
+    const startMeta = formatDateToYmdHm(startDt)
+    const endMeta = formatDateToYmdHm(endDt)
+    const entry: Entry = {
+      id: `grb_drop_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      recordType: "generatedRoster",
+      crewCode: pendingCrewDutyDrop.crewCode,
+      crewName: pendingCrewDutyDrop.crewName,
+      crewType: "",
+      cycleNumber: "",
+      startDate: startMeta.ymd,
+      endDate: endMeta.ymd,
+      startTime: startMeta.hm,
+      endTime: endMeta.hm,
+      rosterType: pendingCrewDutyDrop.rosterBarMap === "REST" ? "REST" : "DUTY CODE",
+      dutyCode: pendingCrewDutyDrop.code,
+      dutyType: pendingCrewDutyDrop.dutyType,
+      dutyColor: config.color || getDefaultDutyCodeColor(pendingCrewDutyDrop.code),
+      fdpPattern: "Manual drag assignment",
+    }
+    setStore((prev) => {
+      const kept = prev.crewLeavePlanner.filter((row) => {
+        if (pendingCrewDutyDrop.mode !== "override") return true
+        if ((row.recordType || "").trim().toLowerCase() !== "generatedroster") return true
+        if (!pendingCrewDutyDrop.conflicts.some((c) => c.id === row.id)) return true
+        return false
+      })
+      return { ...prev, crewLeavePlanner: [entry, ...kept] }
+    })
+    setPendingCrewDutyDrop((p) => ({ ...p, open: false }))
+  }
+
   const addActualLeaveSegment = (params: {
     crewCode: string
+    crewName?: string
     cycleNumber: string
     startDate: string
     endDate: string
     maxDays?: number
+    sourceBlockId?: string
+    overrideConflicts?: string
+    clearConflictingDutyCodes?: boolean
   }) => {
     const crewCode = normalizeCrewCode(params.crewCode || "")
     const cycleNumber = (params.cycleNumber || "").trim()
@@ -6435,12 +7922,40 @@ export default function Page() {
       createdAt: new Date().toISOString(),
       recordType: "actualLeaveSegment",
       crewCode,
+      crewName: params.crewName || "",
       cycleNumber,
       startDate,
       endDate,
       plannedDays: String(requestedDays),
+      sourceBlockId: params.sourceBlockId || "",
+      overrideConflicts: params.overrideConflicts || "",
     }
-    setStore((prev) => ({ ...prev, crewLeavePlanner: [entry, ...prev.crewLeavePlanner] }))
+    setStore((prev) => {
+      const kept = prev.crewLeavePlanner.filter((row) => {
+        const recordType = (row.recordType || "").trim().toLowerCase()
+        const rowCrewCode = normalizeCrewCode(row.crewCode || "")
+        if (recordType === "actualleavesegment" && rowCrewCode === crewCode) {
+          const sameSource =
+            params.sourceBlockId &&
+            (row.sourceBlockId || "").trim() &&
+            (row.sourceBlockId || "").trim() === params.sourceBlockId
+          const sameCycle =
+            !params.sourceBlockId &&
+            (row.cycleNumber || "").trim() === cycleNumber &&
+            (row.startDate || "").trim() === startDate &&
+            (row.endDate || row.startDate || "").trim() === endDate
+          if (sameSource || sameCycle) return false
+        }
+        if (!params.clearConflictingDutyCodes) return true
+        if (recordType !== "generatedroster") return true
+        if (rowCrewCode !== crewCode) return true
+        if ((row.rosterType || "").trim().toUpperCase() !== "DUTY CODE") return true
+        const rowStart = (row.startDate || "").trim()
+        const rowEnd = (row.endDate || rowStart).trim()
+        return !rowStart || !rowEnd || overlapDaysInclusive(startDate, endDate, rowStart, rowEnd) === 0
+      })
+      return { ...prev, crewLeavePlanner: [entry, ...kept] }
+    })
   }
 
   const addLeavePatternActualSegment = (cycleNumber: string) => {
@@ -6461,6 +7976,116 @@ export default function Page() {
       ...prev,
       crewLeavePlanner: prev.crewLeavePlanner.filter((row) => row.id !== segmentId),
     }))
+    if (editingLeaveSegmentId === segmentId) {
+      setEditingLeaveSegmentId("")
+      setEditingLeaveSegmentDraft({ cycleNumber: "", start: "", end: "" })
+    }
+  }
+
+  const updateLeavePatternActualSegment = (segmentId: string) => {
+    const segmentIdValue = (segmentId || "").trim()
+    const nextCycleNumber = (editingLeaveSegmentDraft.cycleNumber || "").trim()
+    const startDate = (editingLeaveSegmentDraft.start || "").trim()
+    const endDate = (editingLeaveSegmentDraft.end || "").trim()
+    if (!segmentIdValue) return
+    if (!nextCycleNumber) {
+      window.alert("Select the cycle this Actual Leave should adjust.")
+      return
+    }
+    if (!startDate || !endDate) {
+      window.alert("Actual Leave Start and End are required.")
+      return
+    }
+    if (endDate < startDate) {
+      window.alert("Actual Leave End must be after or equal to Start.")
+      return
+    }
+    const existing = store.crewLeavePlanner.find((row) => row.id === segmentIdValue)
+    const existingDays = Number(existing?.plannedDays || "0") || 0
+    const existingCycle = (existing?.cycleNumber || "").trim()
+    const requestedDays = getDateRangeInclusive(startDate, endDate).length
+    const targetCycleRow = leaveDetailPatternRows.find((r) => (r.cycleNumber || "").trim() === nextCycleNumber)
+    const targetCycleRemainingDays = Number(targetCycleRow?.rem || "0") || 0
+    const availableDays = targetCycleRemainingDays + (existingCycle === nextCycleNumber ? existingDays : 0)
+    if (requestedDays > availableDays) {
+      window.alert(`Selected range exceeds remaining balance (${availableDays} day(s)).`)
+      return
+    }
+    const crewCode = normalizeCrewCode(leaveDetailModal.crewCode || existing?.crewCode || "")
+    const matchingLeaveBlock = leaveDetailGeneratedRows.find(
+      (row) =>
+        normalizeCrewCode(row.crewCode || "") === crewCode &&
+        (row.blockType || "").trim().toLowerCase() === "leave" &&
+        (row.cycleNumber || "").trim() === nextCycleNumber,
+    )
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.map((row) => {
+        if (row.id !== segmentIdValue) return row
+        if ((row.recordType || "").trim().toLowerCase() !== "actualleavesegment") return row
+        return {
+          ...row,
+          cycleNumber: nextCycleNumber,
+          sourceBlockId: matchingLeaveBlock?.id || row.sourceBlockId || "",
+          startDate,
+          endDate,
+          plannedDays: String(requestedDays),
+          updatedAt: new Date().toISOString(),
+        }
+      }),
+    }))
+    setLeaveDetailSelectedCycle(nextCycleNumber)
+    setEditingLeaveSegmentId("")
+    setEditingLeaveSegmentDraft({ cycleNumber: "", start: "", end: "" })
+  }
+
+  const assignActualLeaveSegmentToCycle = (segmentId: string, cycleNumberValue: string) => {
+    const segmentIdValue = (segmentId || "").trim()
+    const cycleNumber = (cycleNumberValue || "").trim()
+    if (!segmentIdValue) {
+      window.alert("Select an Actual Leave segment first.")
+      return
+    }
+    if (!cycleNumber) {
+      window.alert("Select the cycle this Actual Leave should adjust.")
+      return
+    }
+    const crewCode = normalizeCrewCode(leaveDetailModal.crewCode || "")
+    const matchingLeaveBlock = leaveDetailGeneratedRows.find(
+      (row) =>
+        normalizeCrewCode(row.crewCode || "") === crewCode &&
+        (row.blockType || "").trim().toLowerCase() === "leave" &&
+        (row.cycleNumber || "").trim() === cycleNumber,
+    )
+    setStore((prev) => ({
+      ...prev,
+      crewLeavePlanner: prev.crewLeavePlanner.map((row) => {
+        if (row.id !== segmentIdValue) return row
+        if ((row.recordType || "").trim().toLowerCase() !== "actualleavesegment") return row
+        const startDate = (row.startDate || "").trim()
+        const endDate = (row.endDate || startDate).trim()
+        return {
+          ...row,
+          crewCode,
+          crewName: row.crewName || leaveDetailModal.crewName || "",
+          cycleNumber,
+          sourceBlockId: matchingLeaveBlock?.id || row.sourceBlockId || "",
+          plannedDays:
+            startDate && endDate && endDate >= startDate
+              ? String(getDateRangeInclusive(startDate, endDate).length)
+              : row.plannedDays || "",
+        }
+      }),
+    }))
+    setLeaveDetailModal((p) => ({
+      ...p,
+      blockId: matchingLeaveBlock?.id || p.blockId,
+      cycleNumber,
+      leaveStart: matchingLeaveBlock?.startDate || p.leaveStart,
+      leaveEnd: matchingLeaveBlock?.endDate || p.leaveEnd,
+      policyName: matchingLeaveBlock?.policyName || p.policyName,
+    }))
+    setLeaveDetailSelectedCycle(cycleNumber)
   }
 
   const shiftLeaveBarAndNextWork = (
@@ -9131,7 +10756,7 @@ export default function Page() {
                       </div>
                     ) : null}
                     <div className="card border">
-                      <div ref={rosterGridWrapRef} style={{ height: "70vh", minHeight: 420 }}>
+                      <div ref={rosterGridWrapRef} style={{ height: "calc(100vh - 300px)", minHeight: 560 }}>
                         <DataGrid
                           rows={rosterVisibleRows.map((row) => ({
                             id: row.staffId,
@@ -9435,7 +11060,7 @@ export default function Page() {
                       <div className="card-header bg-body-tertiary py-2 small fw-semibold">
                         Roster Change Requests
                       </div>
-                      <div style={{ height: 520 }}>
+                      <div style={{ height: "calc(100vh - 260px)", minHeight: 560 }}>
                         <DataGrid
                           rows={rosterChangeRequests}
                           columns={[
@@ -9541,6 +11166,8 @@ export default function Page() {
                       {[
                         { key: "rotationTypes", label: "Rotation Types" },
                         { key: "attendanceCodes", label: "Attendance Codes" },
+                        { key: "dutyTypes", label: "Duty Type Manager" },
+                        { key: "dutyCodes", label: "Duty Codes" },
                         { key: "dailyAttendance", label: "Daily Attendance Record" },
                         { key: "leavePatternManager", label: "Leave Pattern Manager" },
                         { key: "generator", label: "Generator" },
@@ -9560,6 +11187,8 @@ export default function Page() {
                                   tab.key as
                                     | "rotationTypes"
                                     | "attendanceCodes"
+                                    | "dutyTypes"
+                                    | "dutyCodes"
                                     | "dailyAttendance"
                                     | "leavePatternManager"
                                     | "generator"
@@ -9621,7 +11250,7 @@ export default function Page() {
                           </div>
                         </div>
                         <div className="card border">
-                          <div style={{ height: 420 }}>
+                          <div style={{ height: "calc(100vh - 330px)", minHeight: 520 }}>
                             <DataGrid
                               rows={crewLeavePolicies}
                               columns={[
@@ -9744,7 +11373,7 @@ export default function Page() {
                         </div>
 
                         <div className="card border">
-                          <div style={{ height: 380 }}>
+                          <div style={{ height: "calc(100vh - 360px)", minHeight: 500 }}>
                             <DataGrid
                               rows={crewOpsCodeConfigs.map((row) => ({
                                 id: row.id,
@@ -9781,6 +11410,306 @@ export default function Page() {
                                           type="button"
                                           className="btn btn-sm btn-link text-danger p-0"
                                           onClick={() => deleteCrewOpsCode(row.id)}
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    )
+                                  },
+                                },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "dutyTypes" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold">
+                            Duty Type Manager
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2">
+                              <div className="col-12 col-md-5">
+                                <label className="form-label small fw-semibold">Duty Type</label>
+                                <input
+                                  className="form-control"
+                                  value={crewDutyTypeForm.dutyType}
+                                  onChange={(e) =>
+                                    setCrewDutyTypeForm((p) => ({ ...p, dutyType: e.target.value }))
+                                  }
+                                  placeholder="e.g. Flight Duty, Ground Duty, OF"
+                                />
+                              </div>
+                              <div className="col-12 col-md-4">
+                                <label className="form-label small fw-semibold">Map To Roster Bar</label>
+                                <select
+                                  className="form-select"
+                                  value={crewDutyTypeForm.rosterBarMap}
+                                  onChange={(e) =>
+                                    setCrewDutyTypeForm((p) => ({ ...p, rosterBarMap: e.target.value }))
+                                  }
+                                >
+                                  <option value="ROSTER DAY">Roster Day</option>
+                                  <option value="REST">Rest Day</option>
+                                </select>
+                              </div>
+                              <div className="col-12 col-md-3 d-flex align-items-end">
+                                <div className="d-flex gap-2">
+                                  <Button onClick={saveCrewDutyType}>
+                                    {editingCrewDutyTypeName ? "Update" : "Save"}
+                                  </Button>
+                                  {(editingCrewDutyTypeName || crewDutyTypeForm.dutyType) ? (
+                                    <Button variant="outline" onClick={resetCrewDutyTypeForm}>
+                                      Cancel
+                                    </Button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="small text-muted mt-2">
+                              Example: Flight Duty and Ground Duty map to Roster Day. OF / Release maps to Rest Day.
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="card border">
+                          <div style={{ height: "calc(100vh - 360px)", minHeight: 500 }}>
+                            <DataGrid
+                              rows={crewDutyTypeConfigs.map((row) => ({
+                                id: row.id,
+                                dutyType: row.dutyType || "",
+                                rosterBarMap: row.rosterBarMap === "REST" ? "REST" : "ROSTER DAY",
+                                source: row.isDefault === "Yes" ? "Default" : "Saved",
+                              }))}
+                              columns={[
+                                { field: "dutyType", headerName: "Duty Type", minWidth: 220, flex: 1 },
+                                { field: "rosterBarMap", headerName: "Roster Bar Map", width: 170 },
+                                { field: "source", headerName: "Source", width: 120 },
+                                {
+                                  field: "__actions",
+                                  headerName: "Actions",
+                                  width: 150,
+                                  sortable: false,
+                                  filterable: false,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const row = params.row as Entry
+                                    return (
+                                      <div className="d-flex gap-2">
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link p-0"
+                                          onClick={() => editCrewDutyType(row.id)}
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link text-danger p-0"
+                                          onClick={() => deleteCrewDutyType(row.id)}
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    )
+                                  },
+                                },
+                              ]}
+                              disableRowSelectionOnClick
+                              rowHeight={34}
+                              sx={gridSx}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {crewLeavePlannerTab === "dutyCodes" ? (
+                      <div className="d-flex flex-column gap-3">
+                        <div className="card border">
+                          <div className="card-header bg-body-tertiary py-2 small fw-semibold">
+                            Duty Code Manager
+                          </div>
+                          <div className="card-body">
+                            <div className="row g-2">
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Duty Code</label>
+                                <input
+                                  className="form-control text-uppercase"
+                                  value={crewDutyCodeForm.code}
+                                  onChange={(e) =>
+                                    setCrewDutyCodeForm((p) => ({ ...p, code: e.target.value.toUpperCase() }))
+                                  }
+                                  placeholder="e.g. D1"
+                                />
+                              </div>
+                              <div className="col-12 col-md-3">
+                                <label className="form-label small fw-semibold">Duty Name</label>
+                                <input
+                                  className="form-control"
+                                  value={crewDutyCodeForm.name}
+                                  onChange={(e) => setCrewDutyCodeForm((p) => ({ ...p, name: e.target.value }))}
+                                  placeholder="e.g. Morning Duty"
+                                />
+                              </div>
+                              <div className="col-12 col-md-2">
+                                <label className="form-label small fw-semibold">Duty Type</label>
+                                <select
+                                  className="form-select"
+                                  value={crewDutyCodeForm.dutyType}
+                                  onChange={(e) => {
+                                    const dutyType = e.target.value
+                                    const dutyTypeConfig = crewDutyTypeConfigs.find((row) => row.dutyType === dutyType)
+                                    const isRestType =
+                                      dutyTypeConfig?.rosterBarMap === "REST" ||
+                                      getCrewDutyRosterBarMap(dutyType) === "REST"
+                                    setCrewDutyCodeForm((p) => ({
+                                      ...p,
+                                      dutyType,
+                                      startTime:
+                                        isRestType && (!p.startTime || p.startTime === "00:00")
+                                          ? "19:30"
+                                          : p.startTime,
+                                      endTime:
+                                        isRestType && (!p.endTime || p.endTime === "00:00")
+                                          ? "23:59"
+                                          : p.endTime,
+                                    }))
+                                  }}
+                                >
+                                  {crewDutyTypeConfigs.map((row) => (
+                                    <option key={row.id} value={row.dutyType || ""}>
+                                      {row.dutyType || "-"} / {row.rosterBarMap === "REST" ? "Rest Day" : "Roster Day"}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Default Start</label>
+                                <input
+                                  type="time"
+                                  className="form-control"
+                                  value={crewDutyCodeForm.startTime}
+                                  onChange={(e) =>
+                                    setCrewDutyCodeForm((p) => ({ ...p, startTime: e.target.value }))
+                                  }
+                                />
+                              </div>
+                              <div className="col-6 col-md-2">
+                                <label className="form-label small fw-semibold">Default End</label>
+                                <input
+                                  type="time"
+                                  className="form-control"
+                                  value={crewDutyCodeForm.endTime}
+                                  onChange={(e) =>
+                                    setCrewDutyCodeForm((p) => ({ ...p, endTime: e.target.value }))
+                                  }
+                                />
+                              </div>
+                              <div className="col-6 col-md-1">
+                                <label className="form-label small fw-semibold">Color</label>
+                                <input
+                                  type="color"
+                                  className="form-control form-control-color w-100"
+                                  value={crewDutyCodeForm.color}
+                                  onChange={(e) =>
+                                    setCrewDutyCodeForm((p) => ({ ...p, color: e.target.value }))
+                                  }
+                                  title="Duty code bar color"
+                                />
+                              </div>
+                              <div className="col-12 col-md-1 d-flex align-items-end">
+                                <div className="d-flex gap-2">
+                                  <Button onClick={saveCrewDutyCode}>
+                                    {editingCrewDutyCodeId ? "Update" : "Save"}
+                                  </Button>
+                                  {editingCrewDutyCodeId ? (
+                                    <Button variant="outline" onClick={resetCrewDutyCodeForm}>
+                                      Cancel
+                                    </Button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="card border">
+                          <div style={{ height: "calc(100vh - 360px)", minHeight: 500 }}>
+                            <DataGrid
+                              rows={crewDutyCodeConfigs.map((row) => ({
+                                id: row.id,
+                                code: (row.code || "").trim().toUpperCase(),
+                                dutyName: row.dutyName || "",
+                                dutyType: row.dutyType || "Flight Duty",
+                                rosterBarMap:
+                                  crewDutyTypeMap.get((row.dutyType || "Flight Duty").trim().toLowerCase()) ||
+                                  row.rosterBarMap ||
+                                  getCrewDutyRosterBarMap(row.dutyType || "Flight Duty"),
+                                defaultStartTime: row.defaultStartTime || "",
+                                defaultEndTime: row.defaultEndTime || "",
+                                color: row.color || getDefaultDutyCodeColor(row.code || ""),
+                                duration:
+                                  row.defaultStartTime && row.defaultEndTime
+                                    ? calculateShiftDuration(row.defaultStartTime, row.defaultEndTime)
+                                    : "-",
+                              }))}
+                              columns={[
+                                { field: "code", headerName: "Duty Code", width: 130 },
+                                { field: "dutyName", headerName: "Duty Name", minWidth: 190, flex: 1 },
+                                { field: "dutyType", headerName: "Duty Type", width: 140 },
+                                { field: "rosterBarMap", headerName: "Roster Bar Map", width: 140 },
+                                {
+                                  field: "color",
+                                  headerName: "Color",
+                                  width: 100,
+                                  renderCell: (params: GridRenderCellParams) => (
+                                    <span
+                                      className="d-inline-flex align-items-center gap-2"
+                                      title={String(params.value || "")}
+                                    >
+                                      <span
+                                        style={{
+                                          width: 18,
+                                          height: 18,
+                                          borderRadius: 3,
+                                          background: String(params.value || "#64748b"),
+                                          border: "1px solid #cbd5e1",
+                                        }}
+                                      />
+                                      <span className="small">{String(params.value || "")}</span>
+                                    </span>
+                                  ),
+                                },
+                                { field: "defaultStartTime", headerName: "Default Start", width: 140 },
+                                { field: "defaultEndTime", headerName: "Default End", width: 140 },
+                                { field: "duration", headerName: "Duration", width: 120 },
+                                {
+                                  field: "__actions",
+                                  headerName: "Actions",
+                                  width: 150,
+                                  sortable: false,
+                                  filterable: false,
+                                  renderCell: (params: GridRenderCellParams) => {
+                                    const row = params.row as Entry
+                                    return (
+                                      <div className="d-flex gap-2">
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link p-0"
+                                          onClick={() => editCrewDutyCode(row.id)}
+                                        >
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-sm btn-link text-danger p-0"
+                                          onClick={() => deleteCrewDutyCode(row.id)}
                                         >
                                           Delete
                                         </button>
@@ -9905,7 +11834,7 @@ export default function Page() {
                           </div>
                         </div>
                         <div className="card border">
-                          <div style={{ height: 360 }}>
+                          <div style={{ height: "calc(100vh - 390px)", minHeight: 480 }}>
                             <DataGrid
                               rows={crewLeaveMarks.map((m) => ({
                                 id: m.id,
@@ -10471,7 +12400,7 @@ export default function Page() {
                           </div>
                         </div>
                       </div>
-                      <div style={{ height: 420 }}>
+                      <div style={{ height: "calc(100vh - 330px)", minHeight: 520 }}>
                         <DataGrid
                           rows={computedCrewGeneratedBlocks
                             .filter((b) => {
@@ -10565,16 +12494,59 @@ export default function Page() {
                             <button
                               type="button"
                               className="btn btn-sm btn-outline-dark"
-                              onClick={() => setIsCrewRosterGeneratorOpen(true)}
+                              onClick={() => {
+                                const range = getCurrentSixMonthRange()
+                                setCrewRosterGeneratorForm((p) => ({
+                                  ...p,
+                                  fromDate: range.fromDate,
+                                  toDate: range.toDate,
+                                }))
+                                setCrewRosterGeneratorTab("setup")
+                                setIsCrewRosterGeneratorOpen(true)
+                              }}
                             >
                               Roster Generator
                             </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-outline-primary"
+                              onClick={() => crewRosterExcelInputRef.current?.click()}
+                            >
+                              Import Crew Roster Excel
+                            </button>
+                            <input
+                              ref={crewRosterExcelInputRef}
+                              type="file"
+                              accept=".xlsx,.xls"
+                              className="d-none"
+                              onChange={async (e) => {
+                                const inputEl = e.currentTarget
+                                const file = e.target.files?.[0]
+                                if (!file) return
+                                await importCrewRosterExcel(file)
+                                if (inputEl) inputEl.value = ""
+                              }}
+                            />
                             <button
                               type="button"
                               className={"btn btn-sm " + (showTimelineWpLpSummary ? "btn-primary" : "btn-outline-secondary")}
                               onClick={() => setShowTimelineWpLpSummary((v) => !v)}
                             >
                               WP/LP Summary {showTimelineWpLpSummary ? "On" : "Off"}
+                            </button>
+                            <button
+                              type="button"
+                              className={"btn btn-sm " + (showTimelineWorkBars ? "btn-primary" : "btn-outline-secondary")}
+                              onClick={() => setShowTimelineWorkBars((v) => !v)}
+                            >
+                              WP Bar {showTimelineWorkBars ? "On" : "Off"}
+                            </button>
+                            <button
+                              type="button"
+                              className={"btn btn-sm " + (showTimelineLeaveBars ? "btn-primary" : "btn-outline-secondary")}
+                              onClick={() => setShowTimelineLeaveBars((v) => !v)}
+                            >
+                              LP Bar {showTimelineLeaveBars ? "On" : "Off"}
                             </button>
                           </div>
                           <div className="d-flex align-items-center gap-2">
@@ -10584,7 +12556,7 @@ export default function Page() {
                             <input
                               type="range"
                               min={18}
-                              max={72}
+                              max={144}
                               step={2}
                               className="form-range mb-0"
                               style={{ width: 150 }}
@@ -10605,6 +12577,47 @@ export default function Page() {
                               Open In New Tab
                             </button>
                           </div>
+                        </div>
+                        <div className="d-flex flex-wrap align-items-center gap-2 mb-2 p-2 border rounded bg-body-tertiary">
+                          <span className="small fw-semibold text-muted me-1">Drag Duty / Rest Code:</span>
+                          {crewDutyCodeConfigs.length ? (
+                            crewDutyCodeConfigs.map((row) => {
+                              const code = (row.code || "").trim().toUpperCase()
+                              if (!code) return null
+                              const dutyType = (row.dutyType || "").trim()
+                              const map =
+                                crewDutyTypeMap.get(dutyType.toLowerCase()) ||
+                                row.rosterBarMap ||
+                                getCrewDutyRosterBarMap(dutyType)
+                              const color =
+                                row.color ||
+                                (map === "REST" ? ROSTER_OFF_COLOR.bg : getDefaultDutyCodeColor(code))
+                              return (
+                                <span
+                                  key={`drag-duty-${row.id}`}
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData("application/x-crew-duty-code", code)
+                                    e.dataTransfer.effectAllowed = "copy"
+                                  }}
+                                  className="badge rounded-pill"
+                                  title={`${code} - ${row.dutyName || dutyType || ""} (${map === "REST" ? "Rest" : "Roster Day"})`}
+                                  style={{
+                                    cursor: "grab",
+                                    background: color,
+                                    color: "#ffffff",
+                                    border: "1px solid rgba(15,23,42,0.25)",
+                                    padding: "7px 10px",
+                                    fontSize: 12,
+                                  }}
+                                >
+                                  {code} {map === "REST" ? "Rest" : "Duty"}
+                                </span>
+                              )
+                            })
+                          ) : (
+                            <span className="small text-muted">Create duty codes in Duty Code Manager first.</span>
+                          )}
                         </div>
                           {!crewLeaveTimelineView.crewRows.length || !crewLeaveTimelineView.dates.length ? (
                             <div className="small text-muted">
@@ -10881,7 +12894,12 @@ export default function Page() {
                                 ))
                                   : null}
 
-                                {crewLeaveTimelineView.crewRows.map((row) => (
+                                {crewLeaveTimelineView.crewRows.map((row) => {
+                                  const showAnyPatternBars = showTimelineWorkBars || showTimelineLeaveBars
+                                  const timelineRowHeight = showAnyPatternBars ? 42 : 30
+                                  const rosterBarTop = showAnyPatternBars ? 22 : 3
+                                  const rosterBarHeight = showAnyPatternBars ? 16 : timelineRowHeight - 6
+                                  return (
                                   <div
                                     key={row.crewCode}
                                     className="border-bottom"
@@ -10890,7 +12908,7 @@ export default function Page() {
                                       gridTemplateColumns: "220px auto",
                                       width: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
                                       minWidth: 220 + crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
-                                      minHeight: 48,
+                                      minHeight: timelineRowHeight,
                                     }}
                                   >
                                     <div
@@ -10901,17 +12919,20 @@ export default function Page() {
                                         left: 0,
                                         zIndex: 20,
                                         background: "#ffffff",
-                                        padding: "4px 10px",
+                                        padding: "3px 8px",
                                         borderRight: "1px solid #e5e7eb",
                                         boxShadow: "2px 0 0 #e5e7eb",
                                         fontWeight: 600,
                                         fontSize: 12,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
                                       }}
                                     >
                                       <button
                                         type="button"
                                         className="btn btn-link p-0 text-start fw-semibold"
-                                        style={{ fontSize: 12, textDecoration: "underline" }}
+                                        style={{ fontSize: 12, textDecoration: "underline", flexShrink: 0 }}
                                         onClick={() =>
                                           openRosterGeneratorForCrew(
                                             row.crewCode,
@@ -10921,9 +12942,44 @@ export default function Page() {
                                       >
                                         {row.crewCode}
                                       </button>
-                                      <div className="small text-muted text-truncate">{row.crewName || "-"}</div>
+                                      <span
+                                        className="text-muted text-truncate"
+                                        style={{ fontSize: 11, lineHeight: 1.1, minWidth: 0 }}
+                                      >
+                                        {row.crewName || "-"}
+                                      </span>
                                     </div>
                                     <div
+                                      data-crew-timeline-row="true"
+                                      data-crew-code={row.crewCode}
+                                      onDragOver={(e) => {
+                                        if (e.dataTransfer.types.includes("application/x-crew-duty-code")) {
+                                          e.preventDefault()
+                                          e.dataTransfer.dropEffect = "copy"
+                                        }
+                                      }}
+                                      onDrop={(e) => {
+                                        const code = e.dataTransfer.getData("application/x-crew-duty-code")
+                                        if (!code) return
+                                        e.preventDefault()
+                                        e.stopPropagation()
+                                        const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
+                                        const x = Math.max(0, e.clientX - rect.left)
+                                        const idx = Math.floor(x / crewLeaveTimelineDayWidth)
+                                        const selectedDate =
+                                          crewLeaveTimelineView.dates[
+                                            Math.min(
+                                              Math.max(idx, 0),
+                                              Math.max(crewLeaveTimelineView.dates.length - 1, 0),
+                                            )
+                                          ] || (crewLeaveTimelineFilter.fromDate || "").trim()
+                                        openCrewDutyDropModal({
+                                          code,
+                                          crewCode: row.crewCode,
+                                          crewName: row.crewName || "",
+                                          date: selectedDate,
+                                        })
+                                      }}
                                       onClick={(e) => {
                                         const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                                         const x = Math.max(0, e.clientX - rect.left)
@@ -10941,7 +12997,7 @@ export default function Page() {
                                         position: "relative",
                                         width: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
                                         minWidth: crewLeaveTimelineView.totalDays * crewLeaveTimelineDayWidth,
-                                        backgroundImage: "linear-gradient(to right, #f1f5f9 1px, transparent 1px)",
+                                        backgroundImage: "linear-gradient(to right, rgba(148, 163, 184, 0.18) 1px, transparent 1px)",
                                         backgroundSize: `${crewLeaveTimelineDayWidth}px 100%`,
                                         backgroundRepeat: "repeat",
                                       }}
@@ -11002,9 +13058,23 @@ export default function Page() {
                                         const leftDays = overlapDaysInclusive(viewStart, addDaysToYmd(overlapStart, -1), viewStart, viewEnd)
                                         const spanDays = overlapDaysInclusive(overlapStart, overlapEnd, viewStart, viewEnd)
                                         const isLeave = (block.blockType || "").toLowerCase() === "leave"
+                                        if (isLeave && !showTimelineLeaveBars) return null
+                                        if (!isLeave && !showTimelineWorkBars) return null
                                         const deductionDays = isLeave
                                           ? deductionByGeneratedBlockId.get((block.id || "").trim()) || 0
                                           : 0
+                                        const sourceBlockId = (block.id || "").trim()
+                                        const cycleKey = `${normalizeCrewCode(block.crewCode || "")}::${(block.cycleNumber || "").trim()}`
+                                        const hasAssignedActualLeave =
+                                          isLeave &&
+                                          row.rosterBars.some((rb) => {
+                                            if ((rb.rosterType || "").trim().toUpperCase() !== "ACTUAL LEAVE") return false
+                                            if ((rb.sourceBlockId || "").trim() && (rb.sourceBlockId || "").trim() === sourceBlockId) {
+                                              return true
+                                            }
+                                            const rbCycleKey = `${normalizeCrewCode(rb.crewCode || "")}::${(rb.cycleNumber || "").trim()}`
+                                            return rbCycleKey === cycleKey
+                                          })
                                         const rotationKey = (block.policyName || "").trim().toUpperCase() || "DEFAULT"
                                         const palette = [
                                           { workBg: "#dbeafe", workBorder: "#60a5fa", workText: "#1e3a8a", leaveBg: "#dcfce7", leaveBorder: "#4ade80", leaveText: "#166534" },
@@ -11045,6 +13115,7 @@ export default function Page() {
                                               const drag = {
                                                 blockId: (block.id || "").trim(),
                                                 startX: e.clientX,
+                                                startY: e.clientY,
                                                 moved: false,
                                               }
                                               leaveBarDragRef.current = drag
@@ -11052,7 +13123,8 @@ export default function Page() {
                                               const onMove = (ev: MouseEvent) => {
                                                 if (!leaveBarDragRef.current) return
                                                 const dx = ev.clientX - leaveBarDragRef.current.startX
-                                                if (Math.abs(dx) > 4) leaveBarDragRef.current.moved = true
+                                                const dy = ev.clientY - leaveBarDragRef.current.startY
+                                                if (Math.abs(dx) > 4 || Math.abs(dy) > 4) leaveBarDragRef.current.moved = true
                                               }
                                               const onUp = (ev: MouseEvent) => {
                                                 const ref = leaveBarDragRef.current
@@ -11062,6 +13134,36 @@ export default function Page() {
                                                 window.removeEventListener("mouseup", onUp)
                                                 if (!ref) return
                                                 const dx = ev.clientX - ref.startX
+                                                const dy = ev.clientY - ref.startY
+                                                const dropTarget = document
+                                                  .elementFromPoint(ev.clientX, ev.clientY)
+                                                  ?.closest("[data-crew-timeline-row]") as HTMLElement | null
+                                                if (ref.moved && dropTarget && Math.abs(dy) > 8) {
+                                                  const dropCrewCode = normalizeCrewCode(dropTarget.dataset.crewCode || "")
+                                                  const sourceCrewCode = normalizeCrewCode(block.crewCode || "")
+                                                  if (dropCrewCode && dropCrewCode !== sourceCrewCode) {
+                                                    window.alert("Actual Leave can only be assigned to the same crew row.")
+                                                    return
+                                                  }
+                                                  const rect = dropTarget.getBoundingClientRect()
+                                                  const x = Math.max(0, ev.clientX - rect.left)
+                                                  const idx = Math.floor(x / crewLeaveTimelineDayWidth)
+                                                  const dropDate =
+                                                    crewLeaveTimelineView.dates[
+                                                      Math.min(
+                                                        Math.max(idx, 0),
+                                                        Math.max(crewLeaveTimelineView.dates.length - 1, 0),
+                                                      )
+                                                    ] || start
+                                                  const leaveDays = getDateRangeInclusive(start, end).length
+                                                  const actualEndDate = addDaysToYmd(dropDate, Math.max(leaveDays - 1, 0))
+                                                  openActualLeaveDropModal({
+                                                    block,
+                                                    startDate: dropDate,
+                                                    endDate: actualEndDate,
+                                                  })
+                                                  return
+                                                }
                                                 let deltaDays = Math.round(dx / crewLeaveTimelineDayWidth)
                                                 if (ref.moved && deltaDays === 0) deltaDays = dx >= 0 ? 1 : -1
                                                 if (!ref.moved || deltaDays === 0) return
@@ -11097,16 +13199,18 @@ export default function Page() {
                                             style={{
                                               position: "absolute",
                                               left: leftDays * crewLeaveTimelineDayWidth + 1,
-                                              top: 3,
-                                              height: 18,
+                                              top: 2,
+                                              height: 16,
                                               width: Math.max(spanDays * crewLeaveTimelineDayWidth - 2, 10),
                                               borderRadius: 0,
-                                              background: isLeave ? "#facc15" : tone.workBg,
-                                              border: `1px solid ${isLeave ? "#ca8a04" : tone.workBorder}`,
+                                              background: isLeave && hasAssignedActualLeave ? "#fef08a" : isLeave ? "#facc15" : tone.workBg,
+                                              border: `1px solid ${
+                                                isLeave && hasAssignedActualLeave ? "#a3a3a3" : isLeave ? "#ca8a04" : tone.workBorder
+                                              }`,
                                               color: isLeave ? "#111827" : tone.workText,
                                               fontSize: 10,
                                               fontWeight: 700,
-                                              padding: "1px 5px",
+                                              padding: "0 5px",
                                               whiteSpace: "nowrap",
                                               overflow: "hidden",
                                               textOverflow: "ellipsis",
@@ -11117,7 +13221,9 @@ export default function Page() {
                                                 : "default",
                                             }}
                                           >
-                                            {(block.blockType || "").toUpperCase()} {start} → {end} ({spanDays}d)
+                                            {isLeave && hasAssignedActualLeave
+                                              ? `LP ${start} → ${end} (${spanDays}d) | Leave Assigned`
+                                              : `${(block.blockType || "").toUpperCase()} ${start} → ${end} (${spanDays}d)`}
                                             {isLeave && deductionDays > 0 ? (
                                               <span
                                                 style={{
@@ -11175,64 +13281,193 @@ export default function Page() {
                                         )
                                         const rType = (rb.rosterType || "").trim().toUpperCase()
                                         const isRest = rType === "REST"
+                                        const isRosterDay = rType === "ROSTER DAY"
+                                        const isDutyCodeBar = rType === "DUTY CODE"
                                         const isActualLeave = rType === "ACTUAL LEAVE"
                                         const isPlannedLeave = rType === "PLANNED LEAVE"
+                                        const overlappingActualLeaveBars = isActualLeave
+                                          ? []
+                                          : row.rosterBars
+                                              .filter((other) => (other.rosterType || "").trim().toUpperCase() === "ACTUAL LEAVE")
+                                              .map((other) => {
+                                                const otherStart = (other.startDate || "").trim()
+                                                const otherEnd = (other.endDate || otherStart).trim()
+                                                return {
+                                                  startDt: parseLocalDateTime(otherStart, "00:00"),
+                                                  endDt: parseLocalDateTime(otherEnd, "23:59"),
+                                                }
+                                              })
+                                              .filter((other) => barStartDt < other.endDt && barEndDt > other.startDt)
+                                              .sort((a, b) => a.startDt.getTime() - b.startDt.getTime())
+                                        let renderStartDt = barStartDt
+                                        let renderEndDt = barEndDt
+                                        if (!isActualLeave && overlappingActualLeaveBars.length > 0) {
+                                          const firstAl = overlappingActualLeaveBars[0]
+                                          if (barStartDt < firstAl.startDt) {
+                                            renderEndDt = firstAl.startDt
+                                          } else {
+                                            const lastAl = overlappingActualLeaveBars[overlappingActualLeaveBars.length - 1]
+                                            renderStartDt = lastAl.endDt
+                                          }
+                                        }
+                                        if (isRosterDay && overlappingActualLeaveBars.length === 0) {
+                                          const nextActualLeave = row.rosterBars
+                                            .filter((other) => (other.rosterType || "").trim().toUpperCase() === "ACTUAL LEAVE")
+                                            .map((other) => {
+                                              const otherStart = (other.startDate || "").trim()
+                                              const otherEnd = (other.endDate || otherStart).trim()
+                                              return {
+                                                startDt: parseLocalDateTime(otherStart, "00:00"),
+                                                endDt: parseLocalDateTime(otherEnd, "23:59"),
+                                              }
+                                            })
+                                            .filter((other) => other.startDt > barEndDt)
+                                            .sort((a, b) => a.startDt.getTime() - b.startDt.getTime())[0]
+                                          if (nextActualLeave) {
+                                            const hasRestBeforeLeave = row.rosterBars.some((other) => {
+                                              if ((other.rosterType || "").trim().toUpperCase() !== "REST") return false
+                                              const otherStart = (other.startDate || "").trim()
+                                              const otherEnd = (other.endDate || otherStart).trim()
+                                              const otherStartHm = (other.startTime || "00:00").trim()
+                                              const otherEndHm = (other.endTime || "23:59").trim()
+                                              const restStartDt = parseLocalDateTime(otherStart, otherStartHm || "00:00")
+                                              const restEndDt = parseLocalDateTime(otherEnd, otherEndHm || "23:59")
+                                              return restStartDt < nextActualLeave.startDt && restEndDt > barEndDt
+                                            })
+                                            if (!hasRestBeforeLeave) {
+                                              const viewEndDt = parseLocalDateTime(viewEnd, "23:59")
+                                              renderEndDt = nextActualLeave.startDt < viewEndDt ? nextActualLeave.startDt : viewEndDt
+                                            }
+                                          }
+                                        }
+                                        if (!isActualLeave && renderEndDt <= renderStartDt) return null
+                                        const renderLeftFloatDays = Math.max(
+                                          0,
+                                          (renderStartDt.getTime() - viewStartDt.getTime()) / msPerDay,
+                                        )
+                                        const renderSpanFloatDays = Math.max(
+                                          0.08,
+                                          (renderEndDt.getTime() - renderStartDt.getTime()) / msPerDay,
+                                        )
+                                        const hasActualLeaveOverlap = overlappingActualLeaveBars.length > 0
                                         const labelType = isActualLeave
                                           ? "ACTUAL LEAVE"
                                           : isPlannedLeave
                                             ? "LEAVE PATTERN"
-                                            : isRest
-                                              ? "REST"
-                                              : "ROSTER DAY"
+                                            : isDutyCodeBar
+                                              ? "DUTY CODE"
+                                              : isRest
+                                                ? "REST"
+                                                : "ROSTER DAY"
+                                        const dutyCode = (rb.dutyCode || "").trim().toUpperCase()
+                                        const dutyColor = dutyCode
+                                          ? crewDutyCodeColorMap.get(dutyCode) || rb.dutyColor || getDefaultDutyCodeColor(dutyCode)
+                                          : ""
+                                        const hasDutyCodeOverlay =
+                                          !isDutyCodeBar &&
+                                          !isRest &&
+                                          row.rosterBars.some((other) => {
+                                            if ((other.rosterType || "").trim().toUpperCase() !== "DUTY CODE") return false
+                                            const otherStart = (other.startDate || "").trim()
+                                            const otherEnd = (other.endDate || otherStart).trim()
+                                            return overlapDaysInclusive(start, end, otherStart, otherEnd) > 0
+                                          })
+                                        const barLabel = isActualLeave
+                                          ? "AL"
+                                          : isPlannedLeave
+                                            ? "LP"
+                                            : dutyCode || (isRest ? "OF" : "")
+                                        const barTitle = `${barLabel ? `${barLabel} | ` : ""}${labelType} | ${start} ${startHm} to ${end} ${endHm}`
+                                        const getSelectedRosterDateTime = (clientX: number, rect: DOMRect) => {
+                                          const ratio = Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1)
+                                          return new Date(
+                                            renderStartDt.getTime() +
+                                              (renderEndDt.getTime() - renderStartDt.getTime()) * ratio,
+                                          )
+                                        }
                                         return (
                                           <div
                                             key={rb.id}
-                                            title={`ROSTER ${labelType} | ${start} ${startHm} to ${end} ${endHm}`}
+                                            title={barTitle}
                                             onClick={(e) => {
                                               e.stopPropagation()
-                                              openRosterGeneratorForCrew(row.crewCode, start)
+                                              if (Date.now() - lastRosterBarSelectionAtRef.current < 220) return
+                                              if (isActualLeave) {
+                                                openActualLeaveRosterDetails(rb)
+                                                return
+                                              }
+                                              openRosterBarDetails(rb, labelType, renderStartDt, renderEndDt)
+                                            }}
+                                            onMouseDown={(e) => {
+                                              e.preventDefault()
+                                              e.stopPropagation()
+                                              const target = e.currentTarget
+                                              const rect = target.getBoundingClientRect()
+                                              const startX = e.clientX
+                                              const selectionStartDt = getSelectedRosterDateTime(e.clientX, rect)
+                                              let moved = false
+                                              const onMove = (ev: MouseEvent) => {
+                                                if (Math.abs(ev.clientX - startX) > 4) moved = true
+                                              }
+                                              const onUp = (ev: MouseEvent) => {
+                                                window.removeEventListener("mousemove", onMove)
+                                                window.removeEventListener("mouseup", onUp)
+                                                if (!moved) return
+                                                lastRosterBarSelectionAtRef.current = Date.now()
+                                                const selectionEndDt = getSelectedRosterDateTime(ev.clientX, rect)
+                                                const selectedStartDt =
+                                                  selectionStartDt <= selectionEndDt ? selectionStartDt : selectionEndDt
+                                                const selectedEndDt =
+                                                  selectionStartDt <= selectionEndDt ? selectionEndDt : selectionStartDt
+                                                openRosterBarDetails(rb, labelType, selectedStartDt, selectedEndDt)
+                                              }
+                                              window.addEventListener("mousemove", onMove)
+                                              window.addEventListener("mouseup", onUp)
                                             }}
                                             style={{
                                               position: "absolute",
-                                              left: Math.max(leftDays, leftFloatDays) * crewLeaveTimelineDayWidth + 1,
-                                              top: 25,
-                                              height: 18,
-                                              width: Math.max(spanFloatDays * crewLeaveTimelineDayWidth - 2, 8),
+                                              left: Math.max(leftDays, renderLeftFloatDays) * crewLeaveTimelineDayWidth + 1,
+                                              top: isDutyCodeBar ? rosterBarTop + 2 : rosterBarTop,
+                                              height: isDutyCodeBar ? Math.max(rosterBarHeight - 4, 10) : rosterBarHeight,
+                                              width: Math.max(renderSpanFloatDays * crewLeaveTimelineDayWidth - 2, 8),
                                               borderRadius: 0,
-                                              background: isActualLeave
-                                                ? "#facc15"
+                                              backgroundColor: isActualLeave
+                                                ? "#6b7280"
                                                 : isPlannedLeave
                                                   ? "#eab308"
-                                                  : isRest
-                                                    ? "#334155"
-                                                    : "#0ea5a5",
+                                                  : isDutyCodeBar
+                                                    ? dutyColor || "#0ea5a5"
+                                                    : hasDutyCodeOverlay
+                                                      ? "#dcfce7"
+                                                      : dutyColor || (isRest ? "#334155" : "#0ea5a5"),
                                               border: `1px solid ${
                                                 isActualLeave
-                                                  ? "#ca8a04"
+                                                  ? "#4b5563"
                                                   : isPlannedLeave
                                                     ? "#a16207"
-                                                    : isRest
-                                                      ? "#1e293b"
-                                                      : "#0f766e"
+                                                    : hasDutyCodeOverlay && !isDutyCodeBar
+                                                      ? "#86efac"
+                                                      : dutyColor || (isRest ? "#1e293b" : "#0f766e")
                                               }`,
-                                              color: "#ffffff",
+                                              color: hasDutyCodeOverlay && !isDutyCodeBar ? "#14532d" : "#ffffff",
                                               fontSize: 9,
                                               fontWeight: 700,
                                               padding: "1px 4px",
                                               whiteSpace: "nowrap",
                                               overflow: "hidden",
                                               textOverflow: "ellipsis",
-                                              cursor: "pointer",
+                                              cursor: "crosshair",
+                                              zIndex: isActualLeave ? 16 : isDutyCodeBar ? 12 : 4,
                                             }}
                                           >
-                                            {isActualLeave ? "AL" : isPlannedLeave ? "LP" : isRest ? "REST" : "ROSTER"}{" "}
-                                            {spanHours.toFixed(1)}h
+                                            {barLabel}
                                           </div>
                                         )
                                       })}
                                     </div>
                                   </div>
-                                ))}
+                                  )
+                                })}
                               </div>
                             </div>
                           )}
@@ -11417,7 +13652,7 @@ export default function Page() {
                           <div className="card-header bg-body-tertiary py-2 small fw-semibold d-flex align-items-center justify-content-between">
                             <span>Detected conflicts ({crewLeaveConflicts.length})</span>
                           </div>
-                          <div style={{ height: 460 }}>
+                          <div style={{ height: "calc(100vh - 360px)", minHeight: 520 }}>
                             <DataGrid
                               rows={crewLeaveConflicts}
                               columns={[
@@ -11545,7 +13780,7 @@ export default function Page() {
                     </div>
 
                     <div className="card border">
-                      <div style={{ height: 520 }}>
+                      <div style={{ height: "calc(100vh - 240px)", minHeight: 560 }}>
                         <DataGrid
                           rows={filteredActiveRows}
                           disableVirtualization={activeConfig.key === "crewDataBase"}
@@ -12276,6 +14511,8 @@ export default function Page() {
                       setLeaveDetailModal((p) => ({ ...p, open: false }))
                       setLeaveDetailSelectedCycle("")
                       setPendingLeaveBarAdjustment(null)
+                      setEditingLeaveSegmentId("")
+                      setEditingLeaveSegmentDraft({ cycleNumber: "", start: "", end: "" })
                     }}
                   />
                 </div>
@@ -12446,24 +14683,121 @@ export default function Page() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {leaveDetailSegmentsForActiveCycle.map((s) => (
-                                  <tr key={s.id}>
-                                    <td>{s.cycleNumber || leaveDetailActiveCycleNumber || "-"}</td>
-                                    <td>{formatYmdToDdMmYy(s.startDate || "")}</td>
-                                    <td>{formatYmdToDdMmYy(s.endDate || "")}</td>
-                                    <td>{s.plannedDays || "0"}</td>
-                                    <td>{leaveDetailActiveCycleRow?.adjust || "0"}</td>
-                                    <td className="text-end">
-                                      <button
-                                        type="button"
-                                        className="btn btn-sm btn-link text-danger p-0"
-                                        onClick={() => removeLeavePatternActualSegment(s.id)}
-                                      >
-                                        Delete
-                                      </button>
-                                    </td>
-                                  </tr>
-                                ))}
+                                {leaveDetailSegmentsForActiveCycle.map((s) => {
+                                  const isEditingSegment = editingLeaveSegmentId === s.id
+                                  const editCycle = isEditingSegment
+                                    ? editingLeaveSegmentDraft.cycleNumber
+                                    : s.cycleNumber || leaveDetailActiveCycleNumber || ""
+                                  const editStart = isEditingSegment ? editingLeaveSegmentDraft.start : s.startDate || ""
+                                  const editEnd = isEditingSegment ? editingLeaveSegmentDraft.end : s.endDate || ""
+                                  const editDays =
+                                    editStart && editEnd && editEnd >= editStart
+                                      ? getDateRangeInclusive(editStart, editEnd).length
+                                      : Number(s.plannedDays || "0") || 0
+                                  return (
+                                    <tr key={s.id}>
+                                      <td>
+                                        {isEditingSegment ? (
+                                          <select
+                                            className="form-select form-select-sm"
+                                            value={editCycle}
+                                            onChange={(e) =>
+                                              setEditingLeaveSegmentDraft((p) => ({
+                                                ...p,
+                                                cycleNumber: e.target.value,
+                                              }))
+                                            }
+                                          >
+                                            {leaveDetailPatternRows.map((r) => (
+                                              <option key={`edit-seg-cycle-${s.id}-${r.id}`} value={r.cycleNumber}>
+                                                {r.cycleLabel}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        ) : (
+                                          s.cycleNumber || leaveDetailActiveCycleNumber || "-"
+                                        )}
+                                      </td>
+                                      <td>
+                                        {isEditingSegment ? (
+                                          <input
+                                            type="date"
+                                            className="form-control form-control-sm"
+                                            value={editStart}
+                                            onChange={(e) =>
+                                              setEditingLeaveSegmentDraft((p) => ({ ...p, start: e.target.value }))
+                                            }
+                                          />
+                                        ) : (
+                                          formatYmdToDdMmYy(s.startDate || "")
+                                        )}
+                                      </td>
+                                      <td>
+                                        {isEditingSegment ? (
+                                          <input
+                                            type="date"
+                                            className="form-control form-control-sm"
+                                            value={editEnd}
+                                            onChange={(e) =>
+                                              setEditingLeaveSegmentDraft((p) => ({ ...p, end: e.target.value }))
+                                            }
+                                          />
+                                        ) : (
+                                          formatYmdToDdMmYy(s.endDate || "")
+                                        )}
+                                      </td>
+                                      <td>{isEditingSegment ? editDays : s.plannedDays || "0"}</td>
+                                      <td>{leaveDetailActiveCycleRow?.adjust || "0"}</td>
+                                      <td className="text-end">
+                                        {isEditingSegment ? (
+                                          <div className="d-flex justify-content-end gap-2">
+                                            <button
+                                              type="button"
+                                              className="btn btn-sm btn-link p-0"
+                                              onClick={() => updateLeavePatternActualSegment(s.id)}
+                                            >
+                                              Save
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="btn btn-sm btn-link text-muted p-0"
+                                              onClick={() => {
+                                                setEditingLeaveSegmentId("")
+                                                setEditingLeaveSegmentDraft({ cycleNumber: "", start: "", end: "" })
+                                              }}
+                                            >
+                                              Cancel
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <div className="d-flex justify-content-end gap-2">
+                                            <button
+                                              type="button"
+                                              className="btn btn-sm btn-link p-0"
+                                              onClick={() => {
+                                                setEditingLeaveSegmentId(s.id)
+                                                setEditingLeaveSegmentDraft({
+                                                  cycleNumber: s.cycleNumber || leaveDetailActiveCycleNumber || "",
+                                                  start: s.startDate || "",
+                                                  end: s.endDate || s.startDate || "",
+                                                })
+                                              }}
+                                            >
+                                              Edit
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="btn btn-sm btn-link text-danger p-0"
+                                              onClick={() => removeLeavePatternActualSegment(s.id)}
+                                            >
+                                              Delete
+                                            </button>
+                                          </div>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
                               </tbody>
                             </table>
                           ) : (
@@ -12473,6 +14807,62 @@ export default function Page() {
                       </div>
                     </div>
                   </div>
+
+                  {leaveDetailUnassignedActualLeaveSegments.length ? (
+                    <div className="card border border-warning-subtle">
+                      <div className="card-header py-2 small fw-semibold d-flex align-items-center justify-content-between">
+                        <span>Unassigned AL Log</span>
+                        <span className="badge text-bg-warning">{leaveDetailUnassignedActualLeaveSegments.length}</span>
+                      </div>
+                      <div className="card-body p-0">
+                        <div className="table-responsive">
+                          <table className="table table-sm mb-0 align-middle" style={{ fontSize: 12 }}>
+                            <thead>
+                              <tr>
+                                <th>Start</th>
+                                <th>End</th>
+                                <th>Days</th>
+                                <th>Current Cycle</th>
+                                <th style={{ width: 140 }} />
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {leaveDetailUnassignedActualLeaveSegments.map((seg) => (
+                                <tr key={`unassigned-al-${seg.id}`}>
+                                  <td>{formatYmdToDdMmYy(seg.startDate || "")}</td>
+                                  <td>{formatYmdToDdMmYy(seg.endDate || seg.startDate || "")}</td>
+                                  <td>{seg.plannedDays || "0"}</td>
+                                  <td>{seg.cycleNumber || "Not assigned"}</td>
+                                  <td className="text-end">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setLeaveDetailModal((p) => ({
+                                          ...p,
+                                          actualLeaveSegmentId: seg.id,
+                                          cycleNumber: (seg.cycleNumber || "").trim(),
+                                          leaveStart: seg.startDate || p.leaveStart,
+                                          leaveEnd: seg.endDate || seg.startDate || p.leaveEnd,
+                                        }))
+                                        setLeaveDetailSelectedCycle((seg.cycleNumber || "").trim())
+                                        setLeaveDetailDraft({
+                                          start: seg.startDate || "",
+                                          end: seg.endDate || seg.startDate || "",
+                                        })
+                                      }}
+                                    >
+                                      Select
+                                    </Button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
 
                   <div className="card border">
                     <div className="card-header py-2 small fw-semibold">Leave Pattern Manager View (Crew)</div>
@@ -12595,6 +14985,8 @@ export default function Page() {
                       setLeaveDetailModal((p) => ({ ...p, open: false }))
                       setLeaveDetailSelectedCycle("")
                       setPendingLeaveBarAdjustment(null)
+                      setEditingLeaveSegmentId("")
+                      setEditingLeaveSegmentDraft({ cycleNumber: "", start: "", end: "" })
                     }}
                   >
                     Close
@@ -12667,7 +15059,7 @@ export default function Page() {
                           }
                         />
                       </div>
-                      <div className="col-12 col-md-6">
+                      <div className="col-12 col-md-4">
                         <label className="form-label small fw-semibold">Crew</label>
                         <select
                           className="form-select form-select-sm"
@@ -12684,9 +15076,47 @@ export default function Page() {
                           ))}
                         </select>
                       </div>
+                      <div className="col-12 col-md-2">
+                        <label className="form-label small fw-semibold">Default Duty Code</label>
+                        <select
+                          className="form-select form-select-sm"
+                          value={crewRosterGeneratorForm.defaultDutyCode}
+                          onChange={(e) =>
+                            setCrewRosterGeneratorForm((p) => ({
+                              ...p,
+                              defaultDutyCode: e.target.value,
+                              dutyCodeSequence:
+                                !p.dutyCodeSequence || p.dutyCodeSequence === p.defaultDutyCode
+                                  ? e.target.value
+                                  : p.dutyCodeSequence,
+                            }))
+                          }
+                        >
+                          {crewDutyCodeConfigs
+                            .filter((row) => {
+                              const code = (row.code || "").trim().toUpperCase()
+                              if (!code) return false
+                              const dutyType = (row.dutyType || "").trim()
+                              const map =
+                                crewDutyTypeMap.get(dutyType.toLowerCase()) ||
+                                row.rosterBarMap ||
+                                getCrewDutyRosterBarMap(dutyType)
+                              return map !== "REST"
+                            })
+                            .map((row) => {
+                              const code = (row.code || "").trim().toUpperCase()
+                              return (
+                                <option key={`generator-duty-${row.id}`} value={code}>
+                                  {code}
+                                </option>
+                              )
+                            })}
+                        </select>
+                      </div>
                       <div className="col-12">
                         <div className="small text-muted">
-                          Rest period rule: 58 hours with 2 local nights, then FDP 5-day cycle.
+                          Roster Day uses the selected default duty code from Duty Code Manager. Fixed rest days control the
+                          48h recovery rest placement.
                         </div>
                       </div>
                       <div className="col-12">
@@ -12754,6 +15184,20 @@ export default function Page() {
                         />
                       </div>
                       <div className="col-12 col-md-6">
+                        <label className="form-label small fw-semibold">Maximum Duty Time / Day</label>
+                        <input
+                          className="form-control form-control-sm"
+                          value={crewRosterGeneratorForm.maxDutyTimePerDay}
+                          onChange={(e) =>
+                            setCrewRosterGeneratorForm((p) => ({
+                              ...p,
+                              maxDutyTimePerDay: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-text small">Example: 13 hours. Multiple duty codes stop when this limit is reached.</div>
+                      </div>
+                      <div className="col-12 col-md-6">
                         <label className="form-label small fw-semibold">Rest Period</label>
                         <input
                           className="form-control form-control-sm"
@@ -12762,6 +15206,23 @@ export default function Page() {
                             setCrewRosterGeneratorForm((p) => ({ ...p, restPeriod: e.target.value }))
                           }
                         />
+                      </div>
+                      <div className="col-12">
+                        <label className="form-label small fw-semibold">Duty Code Sequence</label>
+                        <input
+                          className="form-control form-control-sm"
+                          placeholder="CB,FD,DP"
+                          value={crewRosterGeneratorForm.dutyCodeSequence}
+                          onChange={(e) =>
+                            setCrewRosterGeneratorForm((p) => ({
+                              ...p,
+                              dutyCodeSequence: e.target.value,
+                            }))
+                          }
+                        />
+                        <div className="form-text small">
+                          Use comma-separated Duty Code Manager codes mapped to Roster Day. Each code keeps its default start/end time.
+                        </div>
                       </div>
                       <div className="col-12 col-md-6">
                         <label className="form-label small fw-semibold">Local Night</label>
@@ -12783,30 +15244,292 @@ export default function Page() {
                           }
                         />
                       </div>
-                      <div className="col-12 col-md-6">
-                        <label className="form-label small fw-semibold">FDP 5 Days Total Hours</label>
-                        <input
-                          type="number"
-                          min={1}
-                          step="0.5"
-                          className="form-control form-control-sm"
-                          value={crewRosterGeneratorForm.fdpFiveDayTotalHours}
-                          onChange={(e) =>
-                            setCrewRosterGeneratorForm((p) => ({
-                              ...p,
-                              fdpFiveDayTotalHours: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
                     </div>
                   )}
                 </div>
                 <div className="modal-footer">
+                  <Button variant="destructive" onClick={clearCrewRosterBars}>
+                    Clear Roster
+                  </Button>
                   <Button variant="outline" onClick={() => setIsCrewRosterGeneratorOpen(false)}>
                     Cancel
                   </Button>
                   <Button onClick={generateCrewRosterBars}>Generate Roster Bars</Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {pendingCrewDutyDrop.open ? (
+        <>
+          <div className="app-modal-backdrop" style={{ zIndex: 1068 }} />
+          <div className="modal d-block" tabIndex={-1} role="dialog" style={{ zIndex: 1069 }}>
+            <div className="modal-dialog modal-lg modal-dialog-centered">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <div>
+                    <h5 className="modal-title fw-semibold">Assign Duty / Rest Code</h5>
+                    <div className="small text-muted">
+                      {pendingCrewDutyDrop.crewCode} {pendingCrewDutyDrop.crewName ? `- ${pendingCrewDutyDrop.crewName}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-close"
+                    aria-label="Close"
+                    onClick={() => setPendingCrewDutyDrop((p) => ({ ...p, open: false }))}
+                  />
+                </div>
+                <div className="modal-body">
+                  <div className="row g-2 mb-3">
+                    <div className="col-6 col-md-3">
+                      <div className="small text-muted">Code</div>
+                      <div className="fw-semibold">{pendingCrewDutyDrop.code}</div>
+                    </div>
+                    <div className="col-6 col-md-3">
+                      <div className="small text-muted">Map</div>
+                      <div className="fw-semibold">
+                        {pendingCrewDutyDrop.rosterBarMap === "REST" ? "Rest Day" : "Roster Day"}
+                      </div>
+                    </div>
+                    <div className="col-6 col-md-3">
+                      <label className="form-label small fw-semibold">Start</label>
+                      <div className="d-flex gap-1">
+                        <input
+                          type="date"
+                          className="form-control form-control-sm"
+                          value={pendingCrewDutyDrop.startDate}
+                          onChange={(e) => setPendingCrewDutyDrop((p) => ({ ...p, startDate: e.target.value }))}
+                        />
+                        <input
+                          type="time"
+                          className="form-control form-control-sm"
+                          value={pendingCrewDutyDrop.startTime}
+                          onChange={(e) => setPendingCrewDutyDrop((p) => ({ ...p, startTime: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                    <div className="col-6 col-md-3">
+                      <label className="form-label small fw-semibold">End</label>
+                      <div className="d-flex gap-1">
+                        <input
+                          type="date"
+                          className="form-control form-control-sm"
+                          value={pendingCrewDutyDrop.endDate}
+                          onChange={(e) => setPendingCrewDutyDrop((p) => ({ ...p, endDate: e.target.value }))}
+                        />
+                        <input
+                          type="time"
+                          className="form-control form-control-sm"
+                          value={pendingCrewDutyDrop.endTime}
+                          onChange={(e) => setPendingCrewDutyDrop((p) => ({ ...p, endTime: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  {pendingCrewDutyDrop.conflicts.length ? (
+                    <div className="alert alert-warning py-2">
+                      <div className="fw-semibold mb-2">Conflict with existing assigned code</div>
+                      <div className="table-responsive mb-2">
+                        <table className="table table-sm mb-0">
+                          <thead>
+                            <tr>
+                              <th>Type</th>
+                              <th>Code</th>
+                              <th>Start</th>
+                              <th>End</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pendingCrewDutyDrop.conflicts.map((c) => (
+                              <tr key={c.id}>
+                                <td>{c.type}</td>
+                                <td>{c.code || "-"}</td>
+                                <td>{formatYmdToDdMmYy(c.start)} {c.startTime}</td>
+                                <td>{formatYmdToDdMmYy(c.end)} {c.endTime}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="d-flex flex-wrap gap-3 small">
+                        <label className="d-flex align-items-center gap-2">
+                          <input
+                            type="radio"
+                            name="crew-duty-drop-mode"
+                            checked={pendingCrewDutyDrop.mode === "after"}
+                            onChange={() => setPendingCrewDutyDrop((p) => ({ ...p, mode: "after" }))}
+                          />
+                          Assign after existing duty end
+                        </label>
+                        <label className="d-flex align-items-center gap-2">
+                          <input
+                            type="radio"
+                            name="crew-duty-drop-mode"
+                            checked={pendingCrewDutyDrop.mode === "override"}
+                            onChange={() => setPendingCrewDutyDrop((p) => ({ ...p, mode: "override" }))}
+                          />
+                          Override conflicting assigned code
+                        </label>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="alert alert-success py-2 mb-0">No assigned duty/rest conflict found.</div>
+                  )}
+                </div>
+                <div className="modal-footer">
+                  <Button variant="outline" onClick={() => setPendingCrewDutyDrop((p) => ({ ...p, open: false }))}>
+                    Cancel
+                  </Button>
+                  <Button onClick={confirmCrewDutyDrop}>Assign Code</Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {pendingActualLeaveDrop.open ? (
+        <>
+          <div className="app-modal-backdrop" style={{ zIndex: 1068 }} />
+          <div className="modal d-block" tabIndex={-1} role="dialog" style={{ zIndex: 1069 }}>
+            <div className="modal-dialog modal-lg modal-dialog-centered">
+              <div className="modal-content">
+                <div className="modal-header">
+                  <div>
+                    <h5 className="modal-title fw-semibold">Assign Actual Leave From Roster Drop</h5>
+                    <div className="small text-muted">
+                      {pendingActualLeaveDrop.crewCode} {pendingActualLeaveDrop.crewName ? `- ${pendingActualLeaveDrop.crewName}` : ""}
+                      {pendingActualLeaveDrop.cycleNumber ? ` | Cycle ${pendingActualLeaveDrop.cycleNumber}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-close"
+                    aria-label="Close"
+                    onClick={() => setPendingActualLeaveDrop((p) => ({ ...p, open: false }))}
+                  />
+                </div>
+                <div className="modal-body">
+                  <div className="row g-2 align-items-end mb-3">
+                    <div className="col-6 col-md-4">
+                      <label className="form-label small fw-semibold">Actual Leave Start</label>
+                      <input
+                        type="date"
+                        className="form-control form-control-sm"
+                        value={pendingActualLeaveDrop.startDate}
+                        onChange={(e) => {
+                          const startDate = e.target.value
+                          const plannedDays = Math.max(pendingActualLeaveDrop.plannedDays || 1, 1)
+                          const endDate = startDate ? addDaysToYmd(startDate, plannedDays - 1) : ""
+                          setPendingActualLeaveDrop((p) => ({
+                            ...p,
+                            startDate,
+                            endDate,
+                            conflicts: findActualLeaveDropConflicts({
+                              crewCode: p.crewCode,
+                              startDate,
+                              endDate,
+                              sourceBlockId: p.sourceBlockId,
+                            }),
+                            override: false,
+                          }))
+                        }}
+                      />
+                    </div>
+                    <div className="col-6 col-md-4">
+                      <label className="form-label small fw-semibold">Actual Leave End</label>
+                      <input
+                        type="date"
+                        className="form-control form-control-sm"
+                        value={pendingActualLeaveDrop.endDate}
+                        onChange={(e) => {
+                          const endDate = e.target.value
+                          setPendingActualLeaveDrop((p) => ({
+                            ...p,
+                            endDate,
+                            plannedDays:
+                              p.startDate && endDate && endDate >= p.startDate
+                                ? getDateRangeInclusive(p.startDate, endDate).length
+                                : p.plannedDays,
+                            conflicts: findActualLeaveDropConflicts({
+                              crewCode: p.crewCode,
+                              startDate: p.startDate,
+                              endDate,
+                              sourceBlockId: p.sourceBlockId,
+                            }),
+                            override: false,
+                          }))
+                        }}
+                      />
+                    </div>
+                    <div className="col-12 col-md-4">
+                      <div className="border rounded p-2 bg-body-tertiary">
+                        <div className="small text-muted">Leave Days</div>
+                        <div className="fw-semibold">{pendingActualLeaveDrop.plannedDays || 0} day(s)</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {pendingActualLeaveDrop.conflicts.length > 0 ? (
+                    <div className="alert alert-warning py-2">
+                      <div className="fw-semibold mb-1">Conflict found in selected range</div>
+                      <div className="table-responsive">
+                        <table className="table table-sm mb-2 align-middle">
+                          <thead>
+                            <tr>
+                              <th>Type</th>
+                              <th>Code</th>
+                              <th>Start</th>
+                              <th>End</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pendingActualLeaveDrop.conflicts.slice(0, 12).map((conflict, idx) => (
+                              <tr key={`${conflict.type}-${conflict.start}-${idx}`}>
+                                <td>{conflict.type}</td>
+                                <td>{conflict.code || "-"}</td>
+                                <td>
+                                  {formatYmdToDdMmYy(conflict.start)} {conflict.startTime}
+                                </td>
+                                <td>
+                                  {formatYmdToDdMmYy(conflict.end)} {conflict.endTime}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <label className="d-flex align-items-center gap-2 small fw-semibold">
+                        <input
+                          type="checkbox"
+                          className="form-check-input mt-0"
+                          checked={pendingActualLeaveDrop.override}
+                          onChange={(e) =>
+                            setPendingActualLeaveDrop((p) => ({ ...p, override: e.target.checked }))
+                          }
+                        />
+                        Override conflict and save Actual Leave
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="alert alert-success py-2 mb-0">
+                      No roster conflict found for this Actual Leave range.
+                    </div>
+                  )}
+                </div>
+                <div className="modal-footer">
+                  <Button variant="outline" onClick={() => setPendingActualLeaveDrop((p) => ({ ...p, open: false }))}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={confirmActualLeaveDrop}
+                    disabled={pendingActualLeaveDrop.conflicts.length > 0 && !pendingActualLeaveDrop.override}
+                  >
+                    Save Actual Leave
+                  </Button>
                 </div>
               </div>
             </div>
@@ -12836,6 +15559,81 @@ export default function Page() {
                     <div><strong>Start:</strong> {rosterBarDetailModal.startDate} {rosterBarDetailModal.startTime}</div>
                     <div><strong>End:</strong> {rosterBarDetailModal.endDate} {rosterBarDetailModal.endTime}</div>
                     <div><strong>Duration:</strong> {rosterBarDetailModal.durationHours}h</div>
+                    <div>
+                      <strong>Duty Code Assigned:</strong>{" "}
+                      {rosterBarDetailModal.dutyAssignments.length
+                        ? rosterBarDetailModal.dutyAssignments.map((d) => d.code).filter(Boolean).join(", ")
+                        : "-"}
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <div className="small fw-semibold mb-1">Assigned Duty Codes</div>
+                    <div style={{ maxHeight: 180, overflow: "auto", border: "1px solid #e5e7eb", borderRadius: 6 }}>
+                      <table className="table table-sm mb-0">
+                        <thead>
+                          <tr>
+                            <th>Code</th>
+                            <th>Duty Type</th>
+                            <th style={{ minWidth: 170 }}>Start</th>
+                            <th style={{ minWidth: 170 }}>End</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rosterBarDetailModal.dutyAssignments.length ? (
+                            rosterBarDetailModal.dutyAssignments.map((d, idx) => (
+                              <tr key={d.id || `${d.code}-${d.startDate}-${idx}`}>
+                                <td className="fw-semibold">{d.code || "-"}</td>
+                                <td>{d.dutyType || "-"}</td>
+                                <td>
+                                  <div className="d-flex gap-1">
+                                    <input
+                                      type="date"
+                                      className="form-control form-control-sm"
+                                      value={d.startDate}
+                                      onChange={(e) =>
+                                        updateRosterDetailDutyAssignment(idx, "startDate", e.target.value)
+                                      }
+                                    />
+                                    <input
+                                      type="time"
+                                      className="form-control form-control-sm"
+                                      value={d.startTime}
+                                      onChange={(e) =>
+                                        updateRosterDetailDutyAssignment(idx, "startTime", e.target.value)
+                                      }
+                                    />
+                                  </div>
+                                </td>
+                                <td>
+                                  <div className="d-flex gap-1">
+                                    <input
+                                      type="date"
+                                      className="form-control form-control-sm"
+                                      value={d.endDate}
+                                      onChange={(e) =>
+                                        updateRosterDetailDutyAssignment(idx, "endDate", e.target.value)
+                                      }
+                                    />
+                                    <input
+                                      type="time"
+                                      className="form-control form-control-sm"
+                                      value={d.endTime}
+                                      onChange={(e) =>
+                                        updateRosterDetailDutyAssignment(idx, "endTime", e.target.value)
+                                      }
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={4} className="text-muted">No duty code assigned in this selected range.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                   <div className="mt-3">
                     <div className="small fw-semibold mb-1">By Day Timing</div>
@@ -12844,6 +15642,7 @@ export default function Page() {
                         <thead>
                           <tr>
                             <th>Day</th>
+                            <th>Type</th>
                             <th>Rest From</th>
                             <th>Rest To</th>
                             <th>Roster Day From</th>
@@ -12855,15 +15654,16 @@ export default function Page() {
                             rosterBarDetailModal.daySegments.map((seg, idx) => (
                               <tr key={`${seg.day}-${idx}`}>
                                 <td>{seg.day}</td>
-                                <td>{rosterBarDetailModal.rosterType === "REST" ? seg.from : "-"}</td>
-                                <td>{rosterBarDetailModal.rosterType === "REST" ? seg.to : "-"}</td>
-                                <td>{rosterBarDetailModal.rosterType !== "REST" ? seg.from : "-"}</td>
-                                <td>{rosterBarDetailModal.rosterType !== "REST" ? seg.to : "-"}</td>
+                                <td>{seg.type}</td>
+                                <td>{seg.restFrom || "-"}</td>
+                                <td>{seg.restTo || "-"}</td>
+                                <td>{seg.rosterFrom || "-"}</td>
+                                <td>{seg.rosterTo || "-"}</td>
                               </tr>
                             ))
                           ) : (
                             <tr>
-                              <td colSpan={5} className="text-muted">No day segments.</td>
+                              <td colSpan={6} className="text-muted">No day segments.</td>
                             </tr>
                           )}
                         </tbody>
@@ -12877,6 +15677,12 @@ export default function Page() {
                     onClick={() => setRosterBarDetailModal((p) => ({ ...p, open: false }))}
                   >
                     Close
+                  </Button>
+                  <Button
+                    onClick={saveRosterDetailDutyAssignments}
+                    disabled={rosterBarDetailModal.dutyAssignments.length === 0}
+                  >
+                    Save Duty Times
                   </Button>
                 </div>
               </div>
