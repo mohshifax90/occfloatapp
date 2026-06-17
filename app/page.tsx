@@ -1465,6 +1465,13 @@ function getCurrentAndNextMonthRange() {
   return { fromDate: toYmd(first), toDate: toYmd(last) }
 }
 
+function getCurrentYearRange() {
+  const now = new Date()
+  const first = new Date(now.getFullYear(), 0, 1)
+  const last = new Date(now.getFullYear(), 11, 31)
+  return { fromDate: toYmd(first), toDate: toYmd(last) }
+}
+
 function getCurrentSixMonthRange() {
   const now = new Date()
   const first = new Date(now.getFullYear(), now.getMonth(), 1)
@@ -1639,7 +1646,7 @@ export default function Page() {
     fromDate: "",
     toDate: "",
   })
-  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState(() => getCurrentAndNextMonthRange())
+  const [crewLeaveTimelineFilter, setCrewLeaveTimelineFilter] = useState(() => getCurrentYearRange())
   const [crewLeaveTimelineCrewTypeFilter, setCrewLeaveTimelineCrewTypeFilter] = useState("Captain")
   const [showTimelineWpLpSummary, setShowTimelineWpLpSummary] = useState(true)
   const [showTimelineWorkBars, setShowTimelineWorkBars] = useState(true)
@@ -2211,7 +2218,7 @@ export default function Page() {
   ])
   useEffect(() => {
     if (!isCrewTimelineActive) return
-    setCrewLeaveTimelineFilter(getCurrentAndNextMonthRange())
+    setCrewLeaveTimelineFilter(getCurrentYearRange())
   }, [isCrewTimelineActive])
   useEffect(() => {
     if (!isCrewTimelineActive) return
@@ -2222,8 +2229,14 @@ export default function Page() {
     if (idx < 0) return
     const laneStartX = 220
     const dayWidth = crewLeaveTimelineDayWidth
-    const targetX = laneStartX + idx * dayWidth - Math.max((el.clientWidth - laneStartX) / 2, 0)
-    el.scrollLeft = Math.max(targetX, 0)
+    const centerToday = () => {
+      const targetX =
+        laneStartX + idx * dayWidth + dayWidth / 2 - Math.max((el.clientWidth - laneStartX) / 2, 0)
+      el.scrollLeft = Math.max(targetX, 0)
+    }
+    centerToday()
+    const ids = [80, 220, 500].map((delay) => window.setTimeout(centerToday, delay))
+    return () => ids.forEach((id) => window.clearTimeout(id))
   }, [isCrewTimelineActive, crewLeaveTimelineView.dates, crewLeaveTimelineDayWidth])
   const computedCrewGeneratedBlocks = useMemo(() => {
     const byCrewCycle = new Map<string, { work?: Entry; leave?: Entry }>()
