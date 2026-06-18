@@ -197,6 +197,12 @@ const STEP_COLORS = {
   pending: "#adb5bd",
 }
 
+function canUseLocalDataStore() {
+  if (typeof window === "undefined") return false
+  const host = window.location.hostname
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || /^10\.|^172\.|^192\.168\./.test(host)
+}
+
 type SheetJSWindow = Window & {
   XLSX?: {
     read: (data: ArrayBuffer, opts: { type: "array"; cellDates?: boolean }) => {
@@ -3099,16 +3105,28 @@ export default function Page() {
   }
 
   useEffect(() => {
+    if (typeof window === "undefined" || canUseLocalDataStore()) return
+    try {
+      window.localStorage.removeItem(STORAGE_KEY)
+      window.localStorage.removeItem(AUTH_CACHE_KEY)
+      window.localStorage.removeItem(STAFF_PORTAL_REQUESTS_KEY)
+    } catch {
+      // Production uses Supabase as source of truth; stale browser cache is non-blocking.
+    }
+  }, [])
+
+  useEffect(() => {
     let mounted = true
     const loadData = async () => {
       if (mounted) setHydrated(true)
+      const useLocalDataStore = canUseLocalDataStore()
       let loaded = false
       let loadedFromLocalFirst = false
       let localFirstSnapshot: DataStore | null = null
 
       // Prefer local snapshot first so localhost edits (e.g. Crew DB release date)
       // are not overwritten by older remote payload on refresh.
-      const rawLocalFirst = window.localStorage.getItem(STORAGE_KEY)
+      const rawLocalFirst = useLocalDataStore ? window.localStorage.getItem(STORAGE_KEY) : null
       if (rawLocalFirst) {
         try {
           const parsed = JSON.parse(rawLocalFirst) as DataStore
@@ -3191,19 +3209,21 @@ export default function Page() {
             skipNextRemoteSaveRef.current = true
             lastSyncedStoreJsonRef.current = JSON.stringify(parsedRemote)
             setStore(parsedRemote)
-            try {
-              window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
-            } catch {
+            if (useLocalDataStore) {
               try {
-                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(parsed)))
+                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
               } catch {
-                window.localStorage.setItem(
-                  STORAGE_KEY,
-                  JSON.stringify({
-                    ...parsed,
-                    opsControl: [],
-                  }),
-                )
+                try {
+                  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(parsed)))
+                } catch {
+                  window.localStorage.setItem(
+                    STORAGE_KEY,
+                    JSON.stringify({
+                      ...parsed,
+                      opsControl: [],
+                    }),
+                  )
+                }
               }
             }
             setSyncStatus("synced")
@@ -3216,10 +3236,12 @@ export default function Page() {
               skipNextRemoteSaveRef.current = true
               lastSyncedStoreJsonRef.current = JSON.stringify(parsedRemote)
               setStore(parsedRemote)
-              try {
-                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRemote))
-              } catch {
-                // non-blocking
+              if (useLocalDataStore) {
+                try {
+                  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRemote))
+                } catch {
+                  // non-blocking
+                }
               }
               setSyncStatus("synced")
             } else {
@@ -3229,10 +3251,12 @@ export default function Page() {
               skipNextRemoteSaveRef.current = true
               lastSyncedStoreJsonRef.current = JSON.stringify(merged)
               setStore(merged)
-              try {
-                window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
-              } catch {
-                // non-blocking
+              if (useLocalDataStore) {
+                try {
+                  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+                } catch {
+                  // non-blocking
+                }
               }
               setSyncStatus("synced")
             }
@@ -3244,7 +3268,7 @@ export default function Page() {
       }
 
       if (!loaded && mounted) {
-        const raw = window.localStorage.getItem(STORAGE_KEY)
+        const raw = useLocalDataStore ? window.localStorage.getItem(STORAGE_KEY) : null
         if (raw) {
           try {
             const parsed = JSON.parse(raw) as DataStore
@@ -3279,32 +3303,35 @@ export default function Page() {
 
   useEffect(() => {
     if (!hydrated || !hasLoadedRef.current) return
+    const useLocalDataStore = canUseLocalDataStore()
     const storeJson = JSON.stringify(store)
-    try {
-      window.localStorage.setItem(STORAGE_KEY, storeJson)
-    } catch {
+    if (useLocalDataStore) {
       try {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(store)))
+        window.localStorage.setItem(STORAGE_KEY, storeJson)
       } catch {
+        try {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(store)))
+        } catch {
+          window.localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+              ...store,
+              opsControl: [],
+            }),
+          )
+        }
+      }
+      try {
         window.localStorage.setItem(
-          STORAGE_KEY,
+          AUTH_CACHE_KEY,
           JSON.stringify({
-            ...store,
-            opsControl: [],
+            staff: store.staff || [],
+            userManagement: store.userManagement || [],
           }),
         )
+      } catch {
+        // non-blocking
       }
-    }
-    try {
-      window.localStorage.setItem(
-        AUTH_CACHE_KEY,
-        JSON.stringify({
-          staff: store.staff || [],
-          userManagement: store.userManagement || [],
-        }),
-      )
-    } catch {
-      // non-blocking
     }
 
     if (!supabase || disableRemoteSyncRef.current || !isOnlineRef.current) {
@@ -8389,7 +8416,9 @@ export default function Page() {
         return acc
       }, {} as Record<ModuleKey, Record<string, string>>),
     )
-    window.localStorage.removeItem(STORAGE_KEY)
+    if (canUseLocalDataStore()) {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
     setEditingEntryId(null)
     closeInactivePopup()
   }
@@ -9392,7 +9421,7 @@ export default function Page() {
 
     const importPortalRosterRequests = () => {
       try {
-        const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
+        const raw = canUseLocalDataStore() ? window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY) : null
         const localRequests = raw ? (JSON.parse(raw) as StaffPortalRequest[]) : []
         const mirroredRequests = (((store as unknown as Record<string, unknown>).__staffPortalRequests) || []) as StaffPortalRequest[]
         const requests = Array.isArray(localRequests) ? [...localRequests] : []
@@ -9745,12 +9774,16 @@ export default function Page() {
       | "Cancelled",
   ) => {
     try {
-      const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
-      if (!raw) return
-      const requests = JSON.parse(raw) as StaffPortalRequest[]
-      if (!Array.isArray(requests)) return
-      const next = requests.map((r) => (r.id === requestId ? { ...r, status } : r))
-      window.localStorage.setItem(STAFF_PORTAL_REQUESTS_KEY, JSON.stringify(next))
+      const useLocalDataStore = canUseLocalDataStore()
+      const raw = useLocalDataStore ? window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY) : null
+      const localRequests = raw ? (JSON.parse(raw) as StaffPortalRequest[]) : []
+      const mirroredRequests = (((store as unknown as Record<string, unknown>).__staffPortalRequests) || []) as StaffPortalRequest[]
+      const sourceRequests = Array.isArray(localRequests) && localRequests.length > 0 ? localRequests : mirroredRequests
+      if (!Array.isArray(sourceRequests)) return
+      const next = sourceRequests.map((r) => (r.id === requestId ? { ...r, status } : r))
+      if (useLocalDataStore) {
+        window.localStorage.setItem(STAFF_PORTAL_REQUESTS_KEY, JSON.stringify(next))
+      }
       if (supabase && !disableRemoteSyncRef.current) {
         void (async () => {
           try {
@@ -9765,9 +9798,8 @@ export default function Page() {
                 : {}
             const mirror = Array.isArray(payload.__staffPortalRequests)
               ? (payload.__staffPortalRequests as StaffPortalRequest[])
-              : []
-            const mirroredNext = mirror.map((r) => (r.id === requestId ? { ...r, status } : r))
-            payload.__staffPortalRequests = mirroredNext
+              : next
+            payload.__staffPortalRequests = mirror.map((r) => (r.id === requestId ? { ...r, status } : r))
             await savePayloadJsonToSupabase(JSON.stringify(payload))
           } catch {
             // Non-blocking.
@@ -9883,19 +9915,16 @@ export default function Page() {
 
   const backfillAttendanceFromPortal = () => {
     try {
-      const raw = window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)
-      if (!raw) {
+      const raw = canUseLocalDataStore() ? window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY) : null
+      const mirroredRequests = (((store as unknown as Record<string, unknown>).__staffPortalRequests) || []) as StaffPortalRequest[]
+      const requests = raw ? (JSON.parse(raw) as StaffPortalRequest[]) : mirroredRequests
+      if (!Array.isArray(requests) || requests.length === 0) {
         window.alert(
-          "No staff portal requests found in this browser's localStorage.\n\n" +
+          "No staff portal requests found.\n\n" +
             "If you submitted the duty mark on a different device, the staff " +
-            "portal data is not synced across devices. Open the staff portal " +
-            "in this same browser and re-submit the duty mark.",
+            "portal request may not have synced to Supabase yet. Open the staff portal " +
+            "and re-submit the duty mark if needed.",
         )
-        return
-      }
-      const requests = JSON.parse(raw) as StaffPortalRequest[]
-      if (!Array.isArray(requests)) {
-        window.alert("Invalid staff portal request payload.")
         return
       }
       const normalizeName = (v: string) =>

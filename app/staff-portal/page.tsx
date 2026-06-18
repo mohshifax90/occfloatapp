@@ -61,6 +61,12 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
 const STAFF_PORTAL_BUILD_TAG = process.env.NEXT_PUBLIC_BUILD_ID || "dev"
 
+function canUseLocalDataStore() {
+  if (typeof window === "undefined") return false
+  const host = window.location.hostname
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || /^10\.|^172\.|^192\.168\./.test(host)
+}
+
 // ---------------------------------------------------------------------------
 // Minimal mirrors of the types we need from the main app. We keep them loose
 // (string-keyed) because the data store on disk is `Record<string, string>`.
@@ -585,9 +591,19 @@ export default function StaffPortalPage() {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (typeof window === "undefined") return
-    const seeded = safeParseStore(window.localStorage.getItem(STORAGE_KEY))
+    if (!canUseLocalDataStore()) {
+      try {
+        window.localStorage.removeItem(STORAGE_KEY)
+        window.localStorage.removeItem(AUTH_CACHE_KEY)
+        window.localStorage.removeItem(STAFF_PORTAL_REQUESTS_KEY)
+      } catch {
+        // Production reads the app data from Supabase only.
+      }
+    }
+    const useLocalDataStore = canUseLocalDataStore()
+    const seeded = useLocalDataStore ? safeParseStore(window.localStorage.getItem(STORAGE_KEY)) : getEmptyStore()
     try {
-      const authCacheRaw = window.localStorage.getItem(AUTH_CACHE_KEY)
+      const authCacheRaw = useLocalDataStore ? window.localStorage.getItem(AUTH_CACHE_KEY) : null
       if (authCacheRaw) {
         const authCache = JSON.parse(authCacheRaw) as {
           staff?: Entry[]
@@ -600,7 +616,7 @@ export default function StaffPortalPage() {
       // ignore malformed cache
     }
     setStore(seeded)
-    setStaffRequests(safeParseRequests(window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)))
+    setStaffRequests(useLocalDataStore ? safeParseRequests(window.localStorage.getItem(STAFF_PORTAL_REQUESTS_KEY)) : [])
     setAuthStaffId(window.localStorage.getItem(AUTH_STORAGE_KEY))
     setAuthStaffNo((window.localStorage.getItem(AUTH_STAFF_NO_KEY) || "").trim())
     setHydrated(true)
@@ -621,13 +637,15 @@ export default function StaffPortalPage() {
         const next = normalizeStoreFromPayload(data?.payload)
         if (next.staff.length === 0) return
         setStore(next)
-        try {
-          window.localStorage.setItem(
-            AUTH_CACHE_KEY,
-            JSON.stringify({ staff: next.staff }),
-          )
-        } catch {
-          // ignore
+        if (canUseLocalDataStore()) {
+          try {
+            window.localStorage.setItem(
+              AUTH_CACHE_KEY,
+              JSON.stringify({ staff: next.staff }),
+            )
+          } catch {
+            // ignore
+          }
         }
       } catch {
         // Non-blocking.
@@ -639,6 +657,7 @@ export default function StaffPortalPage() {
   // Persist staff-submitted requests so the main app can pick them up.
   useEffect(() => {
     if (!hydrated) return
+    if (!canUseLocalDataStore()) return
     window.localStorage.setItem(
       STAFF_PORTAL_REQUESTS_KEY,
       JSON.stringify(staffRequests),
@@ -1254,7 +1273,7 @@ export default function StaffPortalPage() {
       }
     })
     setStaffRequests(next)
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && canUseLocalDataStore()) {
       try {
         window.localStorage.setItem(STAFF_PORTAL_REQUESTS_KEY, JSON.stringify(next))
       } catch {
@@ -1287,13 +1306,15 @@ export default function StaffPortalPage() {
       ...prev,
       staff: nextStaff,
     }))
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY)
-      const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
-      const merged = { ...parsed, staff: nextStaff }
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
-    } catch {
-      // non-blocking
+    if (canUseLocalDataStore()) {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY)
+        const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+        const merged = { ...parsed, staff: nextStaff }
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
+      } catch {
+        // non-blocking
+      }
     }
     if (supabase) {
       void (async () => {
