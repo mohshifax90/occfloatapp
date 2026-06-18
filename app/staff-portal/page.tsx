@@ -57,11 +57,13 @@ const AUTH_STAFF_NO_KEY = "occfloat.staffPortalAuthStaffNo"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
+const SUPABASE_STORE_SHARD_PREFIX = `${SUPABASE_STORE_ID}:`
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
 const STAFF_PORTAL_BUILD_TAG = process.env.NEXT_PUBLIC_BUILD_ID || "dev"
 const REMOTE_READ_TIMEOUT_MS = 12_000
 const PORTAL_REMOTE_POLL_MS = 60_000
+const SUPABASE_SHARD_CHUNK_SIZE = 500
 
 function canUseLocalDataStore() {
   if (typeof window === "undefined") return false
@@ -74,6 +76,52 @@ async function fetchSupabaseStorePayload() {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), REMOTE_READ_TIMEOUT_MS)
   try {
+    const shardResponse = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?select=id,payload&id=like.${SUPABASE_STORE_SHARD_PREFIX}%25`,
+      {
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    )
+    if (shardResponse.ok) {
+      const shardRows = (await shardResponse.json()) as Array<{ id?: string; payload?: unknown }>
+      if (shardRows.length > 0) {
+        const values: Record<string, unknown> = {}
+        const manifests: Record<string, number> = {}
+        const chunks: Record<string, Array<{ index: number; items: unknown[] }>> = {}
+        shardRows.forEach((row) => {
+          if (!row.id?.startsWith(SUPABASE_STORE_SHARD_PREFIX)) return
+          const key = row.id.slice(SUPABASE_STORE_SHARD_PREFIX.length)
+          const payload = row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>) : {}
+          const chunkMatch = key.match(/^(.*):chunk:(\d+)$/)
+          if (chunkMatch) {
+            const chunkKey = chunkMatch[1]
+            const index = Number(chunkMatch[2])
+            if (!Number.isFinite(index)) return
+            if (!chunks[chunkKey]) chunks[chunkKey] = []
+            chunks[chunkKey].push({ index, items: Array.isArray(payload.items) ? payload.items : [] })
+            return
+          }
+          if (payload.chunked === true) {
+            manifests[key] = Number(payload.chunks || 0)
+            return
+          }
+          values[key] = Object.prototype.hasOwnProperty.call(payload, "value") ? payload.value : row.payload
+        })
+        Object.entries(manifests).forEach(([key, count]) => {
+          const chunkItems = (chunks[key] || [])
+            .filter((chunk) => chunk.index >= 0 && chunk.index < count)
+            .sort((a, b) => a.index - b.index)
+            .flatMap((chunk) => chunk.items)
+          values[key] = chunkItems
+        })
+        return values
+      }
+    }
     const response = await fetch(
       `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?select=payload&id=eq.${SUPABASE_STORE_ID}`,
       {
@@ -93,6 +141,50 @@ async function fetchSupabaseStorePayload() {
     return null
   } finally {
     window.clearTimeout(timeoutId)
+  }
+}
+
+async function saveSupabaseStorePayload(payload: Record<string, unknown>) {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return
+  const rows: Array<{ id: string; payload: Record<string, unknown> }> = []
+  Object.entries(payload).forEach(([key, value]) => {
+    if (Array.isArray(value) && value.length > SUPABASE_SHARD_CHUNK_SIZE) {
+      const chunks: unknown[][] = []
+      for (let index = 0; index < value.length; index += SUPABASE_SHARD_CHUNK_SIZE) {
+        chunks.push(value.slice(index, index + SUPABASE_SHARD_CHUNK_SIZE))
+      }
+      rows.push({ id: `${SUPABASE_STORE_SHARD_PREFIX}${key}`, payload: { chunked: true, chunks: chunks.length } })
+      chunks.forEach((items, index) => {
+        rows.push({ id: `${SUPABASE_STORE_SHARD_PREFIX}${key}:chunk:${index}`, payload: { items } })
+      })
+      return
+    }
+    rows.push({
+      id: `${SUPABASE_STORE_SHARD_PREFIX}${key}`,
+      payload: { value },
+    })
+  })
+  rows.push({
+    id: SUPABASE_STORE_ID,
+    payload: {
+      __sharded: true,
+      keys: Object.keys(payload),
+      updatedAt: new Date().toISOString(),
+    },
+  })
+  for (let index = 0; index < rows.length; index += 8) {
+    const chunk = rows.slice(index, index + 8)
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?on_conflict=id`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_PUBLISHABLE_KEY,
+        Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify(chunk),
+    })
+    if (!response.ok) throw new Error(`Supabase shard save failed: ${response.status}`)
   }
 }
 
@@ -162,24 +254,7 @@ type StaffRequest = {
 }
 
 async function patchSupabaseStorePayload(payload: Record<string, unknown>) {
-  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return
-  const controller = new AbortController()
-  const timeoutId = window.setTimeout(() => controller.abort(), 15000)
-  try {
-    await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?id=eq.${SUPABASE_STORE_ID}`, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_PUBLISHABLE_KEY,
-        Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=minimal",
-      },
-      body: JSON.stringify({ payload }),
-      signal: controller.signal,
-    })
-  } finally {
-    window.clearTimeout(timeoutId)
-  }
+  await saveSupabaseStorePayload(payload)
 }
 
 type PortalTab = "ops" | "roster" | "leave" | "profile"
