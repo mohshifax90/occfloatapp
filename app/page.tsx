@@ -1552,6 +1552,7 @@ export default function Page() {
   }, [])
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const forceRemoteSyncRef = useRef(false)
+  const skipNextRemoteSaveRef = useRef(false)
   const rosterUploadInputRef = useRef<HTMLInputElement | null>(null)
   const crewRosterExcelInputRef = useRef<HTMLInputElement | null>(null)
   const rosterGridWrapRef = useRef<HTMLDivElement | null>(null)
@@ -3083,7 +3084,6 @@ export default function Page() {
           if (mounted) {
             setStore(localFirstSnapshot)
             if (supabase && !disableRemoteSyncRef.current) {
-              forceRemoteSyncRef.current = true
               setSyncStatus("loading")
             } else {
               setSyncStatus("local-only")
@@ -3153,6 +3153,7 @@ export default function Page() {
           // If local snapshot already loaded in this session, keep it as source
           // of truth and avoid overwriting with potentially older remote payload.
           if (mounted && !loadedFromLocalFirst) {
+            skipNextRemoteSaveRef.current = true
             setStore(parsedRemote)
             try {
               window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
@@ -3176,6 +3177,7 @@ export default function Page() {
             const localScore = localFirstSnapshot ? scoreStore(localFirstSnapshot) : 0
             const remoteScore = scoreStore(parsedRemote)
             if (remoteScore > localScore) {
+              skipNextRemoteSaveRef.current = true
               setStore(parsedRemote)
               try {
                 window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRemote))
@@ -3187,6 +3189,7 @@ export default function Page() {
               const merged = localFirstSnapshot
                 ? mergeStaffProfileUpdates(localFirstSnapshot, parsedRemote)
                 : parsedRemote
+              skipNextRemoteSaveRef.current = true
               setStore(merged)
               try {
                 window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
@@ -3222,14 +3225,6 @@ export default function Page() {
 
       if (mounted) {
         hasLoadedRef.current = true
-        if (
-          forceRemoteSyncRef.current &&
-          supabase &&
-          !disableRemoteSyncRef.current &&
-          isOnlineRef.current
-        ) {
-          setStore((prev) => ({ ...prev }))
-        }
       }
     }
 
@@ -3277,6 +3272,11 @@ export default function Page() {
       if (!supabase || !isOnlineRef.current) setSyncStatus("local-only")
       return
     }
+    if (skipNextRemoteSaveRef.current && !forceRemoteSyncRef.current) {
+      skipNextRemoteSaveRef.current = false
+      setSyncStatus("synced")
+      return
+    }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
 
     const delayMs = forceRemoteSyncRef.current ? 0 : 500
@@ -3284,15 +3284,20 @@ export default function Page() {
       setSyncStatus("saving")
       let error: unknown = null
       try {
-        const result = await supabase.from(SUPABASE_STORE_TABLE).upsert(
-          {
-            id: SUPABASE_STORE_ID,
-            payload: store,
-          },
-          {
-            onConflict: "id",
-          },
-        )
+        const result = await Promise.race([
+          supabase.from(SUPABASE_STORE_TABLE).upsert(
+            {
+              id: SUPABASE_STORE_ID,
+              payload: store,
+            },
+            {
+              onConflict: "id",
+            },
+          ),
+          new Promise<{ error: Error }>((resolve) =>
+            window.setTimeout(() => resolve({ error: new Error("Supabase save timed out.") }), 20000),
+          ),
+        ])
         error = result.error
       } catch (err) {
         error = err
