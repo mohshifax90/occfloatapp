@@ -1459,10 +1459,7 @@ function getCurrentMonthRange() {
 }
 
 function getCurrentAndNextMonthRange() {
-  const now = new Date()
-  const first = new Date(now.getFullYear(), now.getMonth(), 1)
-  const last = new Date(now.getFullYear(), now.getMonth() + 2, 0)
-  return { fromDate: toYmd(first), toDate: toYmd(last) }
+  return getCurrentYearRange()
 }
 
 function getCurrentYearRange() {
@@ -7394,7 +7391,7 @@ export default function Page() {
         crewLeavePlanner: [...allImportedRows, ...kept],
       }
     })
-    setCrewLeaveTimelineFilter({ fromDate, toDate })
+    setCrewLeaveTimelineFilter(getCurrentYearRange())
     setCrewLeavePlannerTab("timeline")
 
     const skippedText = Array.from(skippedCodes.entries())
