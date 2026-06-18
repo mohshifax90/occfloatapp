@@ -1553,6 +1553,7 @@ export default function Page() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const forceRemoteSyncRef = useRef(false)
   const skipNextRemoteSaveRef = useRef(false)
+  const lastSyncedStoreJsonRef = useRef("")
   const rosterUploadInputRef = useRef<HTMLInputElement | null>(null)
   const crewRosterExcelInputRef = useRef<HTMLInputElement | null>(null)
   const rosterGridWrapRef = useRef<HTMLDivElement | null>(null)
@@ -3154,6 +3155,7 @@ export default function Page() {
           // of truth and avoid overwriting with potentially older remote payload.
           if (mounted && !loadedFromLocalFirst) {
             skipNextRemoteSaveRef.current = true
+            lastSyncedStoreJsonRef.current = JSON.stringify(parsedRemote)
             setStore(parsedRemote)
             try {
               window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
@@ -3178,6 +3180,7 @@ export default function Page() {
             const remoteScore = scoreStore(parsedRemote)
             if (remoteScore > localScore) {
               skipNextRemoteSaveRef.current = true
+              lastSyncedStoreJsonRef.current = JSON.stringify(parsedRemote)
               setStore(parsedRemote)
               try {
                 window.localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRemote))
@@ -3190,6 +3193,7 @@ export default function Page() {
                 ? mergeStaffProfileUpdates(localFirstSnapshot, parsedRemote)
                 : parsedRemote
               skipNextRemoteSaveRef.current = true
+              lastSyncedStoreJsonRef.current = JSON.stringify(merged)
               setStore(merged)
               try {
                 window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
@@ -3241,8 +3245,9 @@ export default function Page() {
 
   useEffect(() => {
     if (!hydrated || !hasLoadedRef.current) return
+    const storeJson = JSON.stringify(store)
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+      window.localStorage.setItem(STORAGE_KEY, storeJson)
     } catch {
       try {
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(compactStoreForLocal(store)))
@@ -3272,8 +3277,13 @@ export default function Page() {
       if (!supabase || !isOnlineRef.current) setSyncStatus("local-only")
       return
     }
+    if (!forceRemoteSyncRef.current && storeJson === lastSyncedStoreJsonRef.current) {
+      setSyncStatus("synced")
+      return
+    }
     if (skipNextRemoteSaveRef.current && !forceRemoteSyncRef.current) {
       skipNextRemoteSaveRef.current = false
+      lastSyncedStoreJsonRef.current = storeJson
       setSyncStatus("synced")
       return
     }
@@ -3313,6 +3323,7 @@ export default function Page() {
         return
       }
       forceRemoteSyncRef.current = false
+      lastSyncedStoreJsonRef.current = storeJson
       setSyncStatus("synced")
     }, delayMs)
   }, [store, hydrated, supabase])
