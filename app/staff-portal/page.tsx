@@ -57,6 +57,8 @@ const AUTH_STAFF_NO_KEY = "occfloat.staffPortalAuthStaffNo"
 const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
 const STAFF_PORTAL_BUILD_TAG = process.env.NEXT_PUBLIC_BUILD_ID || "dev"
 
 // ---------------------------------------------------------------------------
@@ -122,6 +124,27 @@ type StaffRequest = {
   documentUploadedAt?: string
   // Free-form note from the staff member.
   reason: string
+}
+
+async function patchSupabaseStorePayload(payload: Record<string, unknown>) {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), 15000)
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?id=eq.${SUPABASE_STORE_ID}`, {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_PUBLISHABLE_KEY,
+        Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ payload }),
+      signal: controller.signal,
+    })
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 type PortalTab = "ops" | "roster" | "leave" | "profile"
@@ -649,7 +672,8 @@ export default function StaffPortalPage() {
             }
             map.set(r.id, { ...existing, ...r })
           })
-          return Array.from(map.values()).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+          const next = Array.from(map.values()).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+          return JSON.stringify(next) === JSON.stringify(prev) ? prev : next
         })
       } catch {
         // Non-blocking.
@@ -675,15 +699,11 @@ export default function StaffPortalPage() {
           .maybeSingle()
         const payload = (data?.payload && typeof data.payload === "object") ? { ...(data.payload as Record<string, unknown>) } : {}
         payload.__staffPortalRequests = staffRequests
-        await supabase.from(SUPABASE_STORE_TABLE).upsert({
-          id: SUPABASE_STORE_ID,
-          payload,
-          updated_at: new Date().toISOString(),
-        })
+        await patchSupabaseStorePayload(payload)
       } catch {
         // Keep portal usable even if remote sync fails.
       }
-    }, 400)
+    }, 5000)
     return () => window.clearTimeout(timer)
   }, [staffRequests, hydrated, supabase])
 
@@ -1288,11 +1308,7 @@ export default function StaffPortalPage() {
               ? ({ ...(data.payload as Record<string, unknown>) } as Record<string, unknown>)
               : {}
           payload.staff = nextStaff
-          await supabase.from(SUPABASE_STORE_TABLE).upsert({
-            id: SUPABASE_STORE_ID,
-            payload,
-            updated_at: new Date().toISOString(),
-          })
+          await patchSupabaseStorePayload(payload)
         } catch {
           // non-blocking
         }
