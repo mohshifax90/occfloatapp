@@ -60,11 +60,40 @@ const SUPABASE_STORE_ID = "primary"
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
 const STAFF_PORTAL_BUILD_TAG = process.env.NEXT_PUBLIC_BUILD_ID || "dev"
+const REMOTE_READ_TIMEOUT_MS = 12_000
+const PORTAL_REMOTE_POLL_MS = 60_000
 
 function canUseLocalDataStore() {
   if (typeof window === "undefined") return false
   const host = window.location.hostname
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || /^10\.|^172\.|^192\.168\./.test(host)
+}
+
+async function fetchSupabaseStorePayload() {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return null
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), REMOTE_READ_TIMEOUT_MS)
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?select=payload&id=eq.${SUPABASE_STORE_ID}`,
+      {
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    )
+    if (!response.ok) return null
+    const rows = (await response.json()) as Array<{ payload?: unknown }>
+    const payload = rows[0]?.payload
+    return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,12 +658,8 @@ export default function StaffPortalPage() {
     if (!hydrated || !supabase) return
     const pullStore = async () => {
       try {
-        const { data } = await supabase
-          .from(SUPABASE_STORE_TABLE)
-          .select("payload")
-          .eq("id", SUPABASE_STORE_ID)
-          .maybeSingle()
-        const next = normalizeStoreFromPayload(data?.payload)
+        const payload = await fetchSupabaseStorePayload()
+        const next = normalizeStoreFromPayload(payload)
         if (next.staff.length === 0) return
         setStore(next)
         if (canUseLocalDataStore()) {
@@ -670,14 +695,7 @@ export default function StaffPortalPage() {
     if (!hydrated || !supabase) return
     const pull = async () => {
       try {
-        const { data } = await supabase
-          .from(SUPABASE_STORE_TABLE)
-          .select("payload")
-          .eq("id", SUPABASE_STORE_ID)
-          .maybeSingle()
-        const payload = (data?.payload && typeof data.payload === "object")
-          ? (data.payload as Record<string, unknown>)
-          : null
+        const payload = await fetchSupabaseStorePayload()
         const remote = (payload?.__staffPortalRequests || []) as StaffRequest[]
         if (!Array.isArray(remote) || remote.length === 0) return
         setStaffRequests((prev) => {
@@ -701,7 +719,7 @@ export default function StaffPortalPage() {
     void pull()
     const id = window.setInterval(() => {
       void pull()
-    }, 4000)
+    }, PORTAL_REMOTE_POLL_MS)
     return () => window.clearInterval(id)
   }, [hydrated, supabase])
 
@@ -711,12 +729,7 @@ export default function StaffPortalPage() {
     if (!hydrated || !supabase) return
     const timer = window.setTimeout(async () => {
       try {
-        const { data } = await supabase
-          .from(SUPABASE_STORE_TABLE)
-          .select("payload")
-          .eq("id", SUPABASE_STORE_ID)
-          .maybeSingle()
-        const payload = (data?.payload && typeof data.payload === "object") ? { ...(data.payload as Record<string, unknown>) } : {}
+        const payload = { ...((await fetchSupabaseStorePayload()) || {}) }
         payload.__staffPortalRequests = staffRequests
         await patchSupabaseStorePayload(payload)
       } catch {
@@ -930,24 +943,22 @@ export default function StaffPortalPage() {
       store.staff.find((s) => normalizeStaffNo(s.staffNo || "") === key) || null
     if (!staff && supabase) {
       try {
-        const { data } = await supabase
-          .from(SUPABASE_STORE_TABLE)
-          .select("payload")
-          .eq("id", SUPABASE_STORE_ID)
-          .maybeSingle()
-        const remoteStore = normalizeStoreFromPayload(data?.payload)
+        const payload = await fetchSupabaseStorePayload()
+        const remoteStore = normalizeStoreFromPayload(payload)
         setLoginDebug(
           `Lookup ${key}: Supabase payload loaded, remote staff count=${remoteStore.staff.length}`,
         )
         if (remoteStore.staff.length > 0) {
           setStore(remoteStore)
-          try {
-            window.localStorage.setItem(
-              AUTH_CACHE_KEY,
-              JSON.stringify({ staff: remoteStore.staff }),
-            )
-          } catch {
-            // ignore
+          if (canUseLocalDataStore()) {
+            try {
+              window.localStorage.setItem(
+                AUTH_CACHE_KEY,
+                JSON.stringify({ staff: remoteStore.staff }),
+              )
+            } catch {
+              // ignore
+            }
           }
           staff =
             remoteStore.staff.find((s) => normalizeStaffNo(s.staffNo || "") === key) || null
@@ -1319,15 +1330,7 @@ export default function StaffPortalPage() {
     if (supabase) {
       void (async () => {
         try {
-          const { data } = await supabase
-            .from(SUPABASE_STORE_TABLE)
-            .select("payload")
-            .eq("id", SUPABASE_STORE_ID)
-            .maybeSingle()
-          const payload =
-            data?.payload && typeof data.payload === "object"
-              ? ({ ...(data.payload as Record<string, unknown>) } as Record<string, unknown>)
-              : {}
+          const payload = { ...((await fetchSupabaseStorePayload()) || {}) }
           payload.staff = nextStaff
           await patchSupabaseStorePayload(payload)
         } catch {

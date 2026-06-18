@@ -190,6 +190,7 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
 const REMOTE_SAVE_MIN_INTERVAL_MS = 60_000
 const REMOTE_SAVE_TIMEOUT_MS = 15_000
+const REMOTE_READ_TIMEOUT_MS = 12_000
 const SHEETJS_CDN = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
 const STEP_COLORS = {
   active: "#0d6efd",
@@ -201,6 +202,33 @@ function canUseLocalDataStore() {
   if (typeof window === "undefined") return false
   const host = window.location.hostname
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || /^10\.|^172\.|^192\.168\./.test(host)
+}
+
+async function fetchSupabaseStorePayload() {
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) return null
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), REMOTE_READ_TIMEOUT_MS)
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?select=payload&id=eq.${SUPABASE_STORE_ID}`,
+      {
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    )
+    if (!response.ok) return null
+    const rows = (await response.json()) as Array<{ payload?: unknown }>
+    const payload = rows[0]?.payload
+    return payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
 }
 
 type SheetJSWindow = Window & {
@@ -3150,14 +3178,10 @@ export default function Page() {
       }
 
       if (supabase && !disableRemoteSyncRef.current) {
-        const { data, error } = await supabase
-          .from(SUPABASE_STORE_TABLE)
-          .select("payload")
-          .eq("id", SUPABASE_STORE_ID)
-          .maybeSingle()
+        const remotePayload = await fetchSupabaseStorePayload()
 
-        if (!error && data && typeof data.payload === "object" && data.payload !== null) {
-          const parsed = data.payload as DataStore
+        if (remotePayload) {
+          const parsed = remotePayload as DataStore
           const parsedRemote = {
             ...getEmptyStore(),
             ...parsed,
@@ -3262,7 +3286,7 @@ export default function Page() {
             }
           }
           loaded = true
-        } else if (error) {
+        } else {
           if (mounted) setSyncStatus("error")
         }
       }
@@ -9787,15 +9811,7 @@ export default function Page() {
       if (supabase && !disableRemoteSyncRef.current) {
         void (async () => {
           try {
-            const { data } = await supabase
-              .from(SUPABASE_STORE_TABLE)
-              .select("payload")
-              .eq("id", SUPABASE_STORE_ID)
-              .maybeSingle()
-            const payload =
-              data?.payload && typeof data.payload === "object"
-                ? ({ ...(data.payload as Record<string, unknown>) } as Record<string, unknown>)
-                : {}
+            const payload = { ...((await fetchSupabaseStorePayload()) || {}) }
             const mirror = Array.isArray(payload.__staffPortalRequests)
               ? (payload.__staffPortalRequests as StaffPortalRequest[])
               : next
