@@ -186,6 +186,10 @@ const STAFF_PORTAL_REQUESTS_KEY = "occfloat.staffPortalRequests"
 const SUPABASE_STORE_TABLE = "occfloat_store"
 const SUPABASE_STORE_ID = "primary"
 const SUPABASE_ROSTER_AUDIT_TABLE = "occfloat_roster_audit_logs"
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const SUPABASE_PUBLISHABLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || ""
+const REMOTE_SAVE_MIN_INTERVAL_MS = 60_000
+const REMOTE_SAVE_TIMEOUT_MS = 15_000
 const SHEETJS_CDN = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
 const STEP_COLORS = {
   active: "#0d6efd",
@@ -1554,6 +1558,7 @@ export default function Page() {
   const forceRemoteSyncRef = useRef(false)
   const skipNextRemoteSaveRef = useRef(false)
   const lastSyncedStoreJsonRef = useRef("")
+  const lastRemoteSaveStartedAtRef = useRef(0)
   const rosterUploadInputRef = useRef<HTMLInputElement | null>(null)
   const crewRosterExcelInputRef = useRef<HTMLInputElement | null>(null)
   const rosterGridWrapRef = useRef<HTMLDivElement | null>(null)
@@ -3064,6 +3069,35 @@ export default function Page() {
     }, {} as Record<ModuleKey, Record<string, string>>)
   })
 
+  const savePayloadJsonToSupabase = async (payloadJson: string) => {
+    if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+      return { error: new Error("Missing Supabase configuration.") }
+    }
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), REMOTE_SAVE_TIMEOUT_MS)
+    try {
+      const response = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?id=eq.${SUPABASE_STORE_ID}`, {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        },
+        body: `{"payload":${payloadJson}}`,
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        return { error: new Error(`Supabase save failed: ${response.status}`) }
+      }
+      return { error: null }
+    } catch (error) {
+      return { error }
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  }
+
   useEffect(() => {
     let mounted = true
     const loadData = async () => {
@@ -3289,25 +3323,19 @@ export default function Page() {
     }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
 
-    const delayMs = forceRemoteSyncRef.current ? 0 : 500
+    const now = Date.now()
+    const sinceLastRemoteSave = now - lastRemoteSaveStartedAtRef.current
+    const intervalDelay =
+      forceRemoteSyncRef.current || sinceLastRemoteSave >= REMOTE_SAVE_MIN_INTERVAL_MS
+        ? 0
+        : REMOTE_SAVE_MIN_INTERVAL_MS - sinceLastRemoteSave
+    const delayMs = forceRemoteSyncRef.current ? 0 : Math.max(5000, intervalDelay)
     saveTimerRef.current = setTimeout(async () => {
       setSyncStatus("saving")
       let error: unknown = null
       try {
-        const result = await Promise.race([
-          supabase.from(SUPABASE_STORE_TABLE).upsert(
-            {
-              id: SUPABASE_STORE_ID,
-              payload: store,
-            },
-            {
-              onConflict: "id",
-            },
-          ),
-          new Promise<{ error: Error }>((resolve) =>
-            window.setTimeout(() => resolve({ error: new Error("Supabase save timed out.") }), 20000),
-          ),
-        ])
+        lastRemoteSaveStartedAtRef.current = Date.now()
+        const result = await savePayloadJsonToSupabase(storeJson)
         error = result.error
       } catch (err) {
         error = err
@@ -9740,11 +9768,7 @@ export default function Page() {
               : []
             const mirroredNext = mirror.map((r) => (r.id === requestId ? { ...r, status } : r))
             payload.__staffPortalRequests = mirroredNext
-            await supabase.from(SUPABASE_STORE_TABLE).upsert({
-              id: SUPABASE_STORE_ID,
-              payload,
-              updated_at: new Date().toISOString(),
-            })
+            await savePayloadJsonToSupabase(JSON.stringify(payload))
           } catch {
             // Non-blocking.
           }
